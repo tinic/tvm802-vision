@@ -10,6 +10,7 @@
 #include <vector>
 #include <algorithm>
 #include <cmath>
+#include <functional>
 
 namespace {
 // Validate an IplImage* and wrap its pixel buffer in a cv::Mat (no copy).
@@ -159,7 +160,7 @@ static MarkResult detect_one_field(const cv::Mat& g, int markSizePx,
 
     std::vector<cv::Vec3f> circles;
     cv::HoughCircles(det, circles, cv::HOUGH_GRADIENT, /*dp*/ 1.0,
-                     /*minDist*/ det.rows / 4.0, /*param1*/ 100, /*param2*/ 25,
+                     /*minDist*/ det.rows / 4.0, /*param1*/ 80, /*param2*/ 25,
                      /*minRadius*/ minRfull, /*maxRadius*/ maxRfull);
     if (circles.empty()) return r;
 
@@ -181,7 +182,9 @@ static MarkResult detect_one_field(const cv::Mat& g, int markSizePx,
     }
 
     // Circularity: reject HoughCircles votes on rectangular pads (need a real
-    // edge around most of the circumference).
+    // edge around most of the circumference). The edge-support fraction also
+    // doubles as a detection-quality score (used for the even/odd tiebreak).
+    double circQuality = 0.0;
     {
         const int N = 24; int hits = 0, valid = 0;
         for (int k = 0; k < N; ++k) {
@@ -195,6 +198,7 @@ static MarkResult detect_one_field(const cv::Mat& g, int markSizePx,
                 ++hits;
         }
         if (valid < N / 2 || hits < 0.70 * valid) return r;
+        circQuality = double(hits) / valid;
     }
 
     // Contrast gate: a real copper dot is a solid bright/dark blob vs annulus.
@@ -239,19 +243,32 @@ static MarkResult detect_one_field(const cv::Mat& g, int markSizePx,
     }
 
     r.found = true; r.cx = fx; r.cy = fy; r.radius = fr;
+    r.quality = circQuality;
     const double maxD = std::sqrt(cxRef * cxRef + cyRef * cyRef);
     r.score = 1.0 - std::sqrt(bestD) / maxD;
     return r;
 }
 
-MarkResult detect_circle_mark(const void* frame, int markSizePx,
-                              double refX, double refY, int searchRadiusPx) {
+// Field-aware wrapper: deinterlace the analog frame into its two time-separated
+// fields (even/odd scanlines, ~1/60s apart), upscale each back to full height,
+// run `perField` on BOTH, and combine. The STK1150 weaves the fields into one
+// frame, so under head motion they comb ("double image"); detecting on each
+// single-instant field and taking the best (or averaging when they agree)
+// removes the combing and ~doubles temporal sampling. The down-vision read has
+// no settle-delay (unlike the up camera), so it fires mid-motion at high speed.
+//
+// `perField` runs on one upscaled full-height field and returns a MarkResult
+// with cx in full-frame x and cy in field-row space; this wrapper applies the
+// +-0.5 row correction and combines. Reused by every field-aware detector
+// (circular, template, ...). NON-DESTRUCTIVE: copies out of the frame buffer.
+static MarkResult detect_with_fields(
+        const void* frame,
+        const std::function<MarkResult(const cv::Mat&)>& perField) {
     MarkResult r;
     if (!frame) return r;
 
     // The native QueryFrame returns an OpenCV 2.4 IplImage*. Its struct layout
-    // is ABI-frozen, so OpenCV 4's IplImage matches it. Validate the header
-    // before trusting it — this runs on a live machine.
+    // is ABI-frozen, so OpenCV 4's IplImage matches it. Validate before trusting.
     const IplImage* ipl = reinterpret_cast<const IplImage*>(frame);
     if (ipl->nSize != sizeof(IplImage)) return r;          // not an IplImage
     if (ipl->width <= 0 || ipl->height <= 0) return r;
@@ -267,7 +284,6 @@ MarkResult detect_circle_mark(const void* frame, int markSizePx,
     r.imgOrigin   = ipl->origin;
     r.imgStep     = ipl->widthStep;
 
-    // Wrap the pixel buffer (no copy) directly from the header fields.
     cv::Mat wrapped(ipl->height, ipl->width,
                     CV_MAKETYPE(CV_8U, ipl->nChannels),
                     ipl->imageData, static_cast<size_t>(ipl->widthStep));
@@ -281,18 +297,6 @@ MarkResult detect_circle_mark(const void* frame, int markSizePx,
     if (img.channels() == 3) cv::cvtColor(img, gray, cv::COLOR_BGR2GRAY);
     else                     gray = img;
 
-    // Deinterlace + BOTH-field detection. The STK1150 analog capture weaves two
-    // time-separated fields (even/odd scanlines, ~1/60s apart) into each frame.
-    // Under head motion the two fields show the copper at different positions
-    // (combing / "double image") and one field is often cleaner than the other.
-    // The down-vision read has no settle-delay (unlike the up camera), so at high
-    // job speed it fires mid-motion. We split the frame into its two fields,
-    // upscale each back to full height (restoring the circle aspect + cy), and
-    // run detection on BOTH; whichever yields a valid mark nearest the reference
-    // wins. This doubles the temporal sampling (~60 Hz of single-instant images)
-    // and recovers frames where only one field is clean. It does NOT rescue
-    // truly in-field-blurred frames (the head must be slow enough). No temporal
-    // averaging (it smeared the ring). NON-DESTRUCTIVE: copies out.
     const size_t step = gray.step[0];
     cv::Mat evenF, oddF, evenU, oddU;
     cv::Mat(gray.rows / 2, gray.cols, gray.type(), gray.data,        step * 2).copyTo(evenF);
@@ -300,8 +304,8 @@ MarkResult detect_circle_mark(const void* frame, int markSizePx,
     cv::resize(evenF, evenU, cv::Size(gray.cols, gray.rows), 0, 0, cv::INTER_LINEAR);
     cv::resize(oddF,  oddU,  cv::Size(gray.cols, gray.rows), 0, 0, cv::INTER_LINEAR);
 
-    MarkResult re = detect_one_field(evenU, markSizePx, refX, refY, searchRadiusPx);
-    MarkResult ro = detect_one_field(oddU,  markSizePx, refX, refY, searchRadiusPx);
+    MarkResult re = perField(evenU);
+    MarkResult ro = perField(oddU);
     if (re.found) re.cy -= 0.5;   // even field samples rows 2i   -> full-frame y
     if (ro.found) ro.cy += 0.5;   // odd  field samples rows 2i+1 -> full-frame y
 
@@ -319,18 +323,29 @@ MarkResult detect_circle_mark(const void* frame, int markSizePx,
             r.cy = 0.5 * (re.cy + ro.cy);
             r.radius = 0.5 * (re.radius + ro.radius);
             r.score = std::max(re.score, ro.score);
+            r.quality = std::max(re.quality, ro.quality);
         } else {
-            // Fields disagree (motion / combing) -> trust the one nearer the ref.
-            const MarkResult& w = (re.score >= ro.score) ? re : ro;
-            r.found = true; r.cx = w.cx; r.cy = w.cy; r.radius = w.radius; r.score = w.score;
+            // Fields disagree (motion / combing) -> trust the better DETECTION
+            // (higher quality), not just the one nearer the reference: under
+            // motion the closer field isn't necessarily the cleaner read.
+            const MarkResult& w = (re.quality >= ro.quality) ? re : ro;
+            r.found = true; r.cx = w.cx; r.cy = w.cy; r.radius = w.radius;
+            r.score = w.score; r.quality = w.quality;
         }
     } else if (re.found) {
-        r.found = true; r.cx = re.cx; r.cy = re.cy; r.radius = re.radius; r.score = re.score;
+        r.found = true; r.cx = re.cx; r.cy = re.cy; r.radius = re.radius; r.score = re.score; r.quality = re.quality;
     } else if (ro.found) {
-        r.found = true; r.cx = ro.cx; r.cy = ro.cy; r.radius = ro.radius; r.score = ro.score;
+        r.found = true; r.cx = ro.cx; r.cy = ro.cy; r.radius = ro.radius; r.score = ro.score; r.quality = ro.quality;
     }
-    r.imgMean = cv::mean(gray)[0];   // full-frame brightness for the log
+    r.imgMean = re.imgMean;   // even-field mean (~frame brightness); no full-frame recompute
     return r;
+}
+
+MarkResult detect_circle_mark(const void* frame, int markSizePx,
+                              double refX, double refY, int searchRadiusPx) {
+    return detect_with_fields(frame, [&](const cv::Mat& g) {
+        return detect_one_field(g, markSizePx, refX, refY, searchRadiusPx);
+    });
 }
 
 } // namespace vis

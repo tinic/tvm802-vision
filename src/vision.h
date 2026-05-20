@@ -12,7 +12,8 @@ struct MarkResult {
     double cx     = 0;   // detected center, image pixels, top-left origin, top-down
     double cy     = 0;
     double radius = 0;
-    double score  = 0;   // 0..1 confidence (higher = better)
+    double score  = 0;   // 0..1 proximity-to-reference (higher = nearer)
+    double quality = 0;  // 0..1 detection quality (circ. edge-support / match corr)
     double imgMean = 0;  // frame brightness; near-0 => dropped/black frame
     // Parsed IplImage header fields (for format diagnostics in the log).
     int    imgW = 0, imgH = 0, imgChannels = 0, imgOrigin = -1, imgStep = 0;
