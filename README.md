@@ -40,6 +40,25 @@ rename to `MVision-orig.dll`), and overrides only the down-vision fiducial path
 mode; everything else (up-vision, nozzle, component checks, etc.) passes straight
 through to the original, unchanged.
 
+## Status & roadmap
+
+This project is replacing the TVM802's weak stock vision one camera path at a
+time, all through the same passthrough shim:
+
+- [x] **Down-vision fiducial detection** (`CheckMark2`) — done; this release.
+- [ ] **Nozzle detection** (`CheckNozzle`) — planned, likely next. The nozzle
+  tip/bore is a circular feature, so it reuses most of the fiducial pipeline
+  (Hough circle + sub-pixel center + both-field deinterlace + bilateral denoise),
+  just with the nozzle radius and metal-vs-copper contrast.
+- [ ] **Component detection** (`CheckComp`) — planned. Components are varied
+  shapes and placement needs an accurate rotation angle, so this is the larger
+  effort (contour / minimum-area-rectangle based, returning center + θ).
+
+Each path reuses the shim, the `GetOffset` plumbing, the up-camera `MatrixUp`
+perspective calibration, and the capture-for-offline-tuning workflow — so each
+one is less work than the last. Contributions and test reports (especially on the
+802A) are welcome.
+
 ## Requirements
 
 - **32-bit (x86)** build — it must match the host process.
