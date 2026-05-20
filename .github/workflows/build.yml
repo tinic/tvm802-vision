@@ -71,3 +71,10 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: build/Release/MVision.dll
+          generate_release_notes: true
+          body: |
+            Drop-in OpenCV down-vision fiducial detector for the QiHe TVM802A / TVM802B.
+
+            Download `MVision.dll` below. You must supply your own original
+            `MVision.dll` (rename it `MVision-orig.dll`) — see the README for
+            install/build instructions. Built x86, static OpenCV (self-contained).
