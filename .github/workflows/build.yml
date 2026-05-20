@@ -35,7 +35,8 @@ jobs:
       # OpenCV runtime DLLs). First run builds OpenCV (slow); cached afterward.
       - name: Install OpenCV (x86 static)
         shell: pwsh
-        run: & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install opencv4:x86-windows-static
+        run: |
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install opencv4:x86-windows-static
 
       - name: Configure (x86, static CRT)
         shell: pwsh
