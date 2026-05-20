@@ -1,0 +1,16 @@
+# build outputs
+build/
+bin/
+obj/
+
+# binaries (never commit vendor or built artifacts)
+*.dll
+*.exe
+*.obj
+*.lib
+*.exp
+*.pdb
+
+# IDE / misc
+.vs/
+*.user
