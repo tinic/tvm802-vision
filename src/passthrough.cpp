@@ -19,6 +19,7 @@
 
 #include <cstdio>
 #include <chrono>
+#include <thread>
 
 // Lightweight timing to locate the frame-rate bottleneck (QueryFrame vs our
 // detector vs the original CheckMark2). Logged per frame when capture is armed.
@@ -30,6 +31,7 @@ inline double ms_since(clk::time_point t) {
 double g_qfMs = 0.0;     // last QueryFrame duration
 double g_detMs = 0.0;    // last our-detector duration
 double g_origMs = 0.0;   // last original-CheckMark2 duration
+unsigned int g_lastFrameHash = 0;  // freshness guard: hash of the last frame served
 }
 
 // ---- shared result state (matches the original's shared-globals design) -----
@@ -75,9 +77,13 @@ void maybe_log(void* frame, const char* func, int algo, int range, const vis::Ma
     if (!cap::armed()) return;
     int idx = cap::next_index();
     if (idx < 0) return;
-    char png[MAX_PATH];
-    std::snprintf(png, sizeof png, "%s\\frame_%04d.png", cap::dir(), idx);
-    vis::save_frame(frame, png);
+    // PNG save is opt-in (separate 'frames' trigger): imwrite is the heavy part
+    // and adds latency to the detection path, so log-only runs stay responsive.
+    if (cap::frames_enabled()) {
+        char png[MAX_PATH];
+        std::snprintf(png, sizeof png, "%s\\frame_%04d.png", cap::dir(), idx);
+        vis::save_frame(frame, png);
+    }
 
     double ox = 0, oy = 0, ow = 0, oh = 0, oa = 0, omin = 0;
     if (mv::orig::GetOffset)  mv::orig::GetOffset(&ox, &oy, &ow, &oh, &oa);
@@ -89,12 +95,12 @@ void maybe_log(void* frame, const char* func, int algo, int range, const vis::Ma
         "ours,found=%d,cx=%.2f,cy=%.2f,W=%.4f,H=%.4f,min=%.3f,"
         "orig,W=%.4f,H=%.4f,min=%.4f,"
         "ms,queryFrame=%.1f,ourDetect=%.1f,origCheck=%.1f,"
-        "ipl,ok=%d,w=%d,h=%d,origin=%d",
+        "ipl,ok=%d,w=%d,h=%d,origin=%d,fhash=%u",
         idx, func, algo, range, g_mvoX, g_mvoY, g_areaMin, g_areaMax,
         mr.found ? 1 : 0, mr.cx, mr.cy, g_ourW, g_ourH, g_ourMin,
         ow, oh, omin,
         g_qfMs, g_detMs, g_origMs,
-        mr.headerOk ? 1 : 0, mr.imgW, mr.imgH, mr.imgOrigin);
+        mr.headerOk ? 1 : 0, mr.imgW, mr.imgH, mr.imgOrigin, mr.frameHash);
     cap::log_line(line);
 }
 } // namespace
@@ -110,6 +116,33 @@ HANDLE __stdcall GetCameraHandle(int idx)                                   { re
 void* __stdcall QueryFrame(void* cam, int timeout) {
     auto t0 = clk::now();
     void* r = mv::orig::QueryFrame(cam, timeout);
+    // Freshness + settle guard. Two problems:
+    //  (1) The STK1150 is polled faster than it delivers (~30 fps) -> QueryFrame
+    //      returns a STALE duplicate ~30% of the time, corrupting the host's
+    //      closed-loop correction.
+    //  (2) Right after move-done the head is still ringing down from the
+    //      correction-move overshoot, so an immediate read catches an unsettled
+    //      position -> the host can't reach a tight window -> times out -> places
+    //      at the overshoot peak (the intermittent ~0.5 mm miss).
+    // Fix: wait until we've seen (1 + kSettleFrames) DISTINCT fresh frames past
+    // the one we last served. This discards stale duplicates AND gives the head
+    // ~kSettleFrames camera periods (~33 ms each) to settle before the read.
+    // Bounded by a timeout; returns the freshest frame seen. Never withholds a
+    // detection, so it can't starve the host's loop. Invalid frames hash to 0
+    // and pass through. kSettleFrames trades loop speed for settle margin.
+    constexpr int kSettleFrames = 2;                 // extra camera frames (~66 ms) to ring down
+    const int  kTarget  = 1 + kSettleFrames;
+    const auto deadline = t0 + std::chrono::milliseconds(160);
+    unsigned int h = vis::frame_hash(r);
+    unsigned int cur = h;
+    int newCount = (h != 0 && h != g_lastFrameHash) ? 1 : 0;
+    while (h != 0 && newCount < kTarget && clk::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        void* r2 = mv::orig::QueryFrame(cam, timeout);
+        unsigned int h2 = vis::frame_hash(r2);
+        if (r2 && h2 != 0) { r = r2; if (h2 != cur) { ++newCount; cur = h2; } h = h2; }
+    }
+    if (h != 0) g_lastFrameHash = h;
     g_qfMs = ms_since(t0);
     return r;
 }

@@ -33,6 +33,22 @@ cv::Mat wrap_ipl(const void* frame, int& origin) {
 
 namespace vis {
 
+unsigned int frame_hash(const void* frame) {
+    if (!frame) return 0;
+    const IplImage* ipl = reinterpret_cast<const IplImage*>(frame);
+    if (ipl->nSize != sizeof(IplImage)) return 0;
+    if (ipl->width <= 0 || ipl->height <= 0) return 0;
+    if (ipl->nChannels != 1 && ipl->nChannels != 3) return 0;
+    if (!ipl->imageData) return 0;
+    unsigned int h = 2166136261u;                       // FNV-1a offset basis
+    const unsigned char* d = reinterpret_cast<const unsigned char*>(ipl->imageData);
+    const int ws = ipl->widthStep, rowbytes = ipl->width * ipl->nChannels;
+    for (int y = 0; y < ipl->height; y += 37)
+        for (int x = 0; x < rowbytes; x += 17)
+            h = (h ^ d[y * ws + x]) * 16777619u;
+    return h ? h : 1u;                                  // 0 reserved for invalid
+}
+
 bool save_frame(const void* frame, const char* path) {
     if (!path) return false;
     int origin = -1;
@@ -305,6 +321,8 @@ static MarkResult detect_with_fields(
     r.imgOrigin   = ipl->origin;
     r.imgStep     = ipl->widthStep;
 
+    r.frameHash = frame_hash(frame);   // stale-frame diagnostic (see compare.log)
+
     cv::Mat wrapped(ipl->height, ipl->width,
                     CV_MAKETYPE(CV_8U, ipl->nChannels),
                     ipl->imageData, static_cast<size_t>(ipl->widthStep));
@@ -322,23 +340,32 @@ static MarkResult detect_with_fields(
     cv::Mat evenF, oddF, evenU, oddU;
     cv::Mat(gray.rows / 2, gray.cols, gray.type(), gray.data,        step * 2).copyTo(evenF);
     cv::Mat(gray.rows / 2, gray.cols, gray.type(), gray.data + step, step * 2).copyTo(oddF);
-    cv::resize(evenF, evenU, cv::Size(gray.cols, gray.rows), 0, 0, cv::INTER_LINEAR);
-    cv::resize(oddF,  oddU,  cv::Size(gray.cols, gray.rows), 0, 0, cv::INTER_LINEAR);
+    // Bob-deinterlace each half-height field back to full height. INTER_CUBIC
+    // (not LINEAR) preserves the copper edge sharpness that HoughCircles' param2
+    // accumulator and the circularity ring-sample at fr+-3 both rely on; the
+    // ~1px vertical softening from bilinear blunts both. Two small resizes/frame
+    // -> negligible cost.
+    cv::resize(evenF, evenU, cv::Size(gray.cols, gray.rows), 0, 0, cv::INTER_CUBIC);
+    cv::resize(oddF,  oddU,  cv::Size(gray.cols, gray.rows), 0, 0, cv::INTER_CUBIC);
 
     MarkResult re = perField(evenU);
     MarkResult ro = perField(oddU);
     if (re.found) re.cy -= 0.5;   // even field samples rows 2i   -> full-frame y
     if (ro.found) ro.cy += 0.5;   // odd  field samples rows 2i+1 -> full-frame y
 
-    // r already carries the header/diagnostic fields. Combine the two field
-    // results; leave found=false if neither found a mark.
+    // The two fields are captured ~1/60 s apart. Combine them by motion state:
+    //  - settled (fields agree): AVERAGE -> full vertical resolution, cancels
+    //    the opposite +-0.5 row bias.
+    //  - moving (fields disagree): report ONLY the most-recent field; the older
+    //    field carries a stale head position that misdirects the host's
+    //    correction. These cameras are bottom-field-first (BFF): the bottom field
+    //    = odd rows (1,3,5) is captured FIRST (older); the top field = even rows
+    //    (0,2,4) is the most recent. So under motion we report the EVEN field.
+    //    (In normal operation this branch is rare -- the host only reads vision
+    //    at a move endpoint, so frames are almost always settled.)
     if (re.found && ro.found) {
         const double dx = re.cx - ro.cx, dy = re.cy - ro.cy;
         if (dx * dx + dy * dy <= 4.0 * 4.0) {
-            // Both fields see the SAME (settled) mark. Each field only has half
-            // the vertical rows, and even vs odd carry an opposite ~0.5px cy bias
-            // (the source of the ~1px "off by a pixel" residual). Averaging them
-            // recovers full vertical resolution and cancels that bias.
             r.found = true;
             r.cx = 0.5 * (re.cx + ro.cx);
             r.cy = 0.5 * (re.cy + ro.cy);
@@ -346,12 +373,8 @@ static MarkResult detect_with_fields(
             r.score = std::max(re.score, ro.score);
             r.quality = std::max(re.quality, ro.quality);
         } else {
-            // Fields disagree (motion / combing) -> trust the better DETECTION
-            // (higher quality), not just the one nearer the reference: under
-            // motion the closer field isn't necessarily the cleaner read.
-            const MarkResult& w = (re.quality >= ro.quality) ? re : ro;
-            r.found = true; r.cx = w.cx; r.cy = w.cy; r.radius = w.radius;
-            r.score = w.score; r.quality = w.quality;
+            r.found = true; r.cx = re.cx; r.cy = re.cy; r.radius = re.radius;
+            r.score = re.score; r.quality = re.quality;     // BFF: even is newest
         }
     } else if (re.found) {
         r.found = true; r.cx = re.cx; r.cy = re.cy; r.radius = re.radius; r.score = re.score; r.quality = re.quality;

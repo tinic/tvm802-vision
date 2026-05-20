@@ -13,6 +13,12 @@ namespace cap {
 // True if capture is armed (trigger file present and frame cap not reached).
 bool armed();
 
+// True if PNG frame saving is enabled (separate, heavier trigger:
+// C:\mvision_capture\frames). compare.log is always written while armed(); image
+// saving is opt-in ON TOP, because imwrite adds latency to the detection path
+// and can hurt closed-loop responsiveness. Arm 'on' alone for log-only runs.
+bool frames_enabled();
+
 // Reserve the next frame index (atomic, capped). Returns the index or -1 when
 // the per-session cap is reached.
 int next_index();

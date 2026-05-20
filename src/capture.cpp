@@ -7,6 +7,7 @@
 namespace {
 constexpr const char* kDir      = "C:\\mvision_capture";
 constexpr const char* kTrigger  = "C:\\mvision_capture\\on";
+constexpr const char* kFramesTrigger = "C:\\mvision_capture\\frames";
 
 std::atomic<int> g_counter{0};
 
@@ -24,6 +25,8 @@ bool armed() {
     // Remove the trigger to stop.
     return file_exists(kTrigger);
 }
+
+bool frames_enabled() { return file_exists(kFramesTrigger); }
 
 int next_index() {
     int idx = g_counter.fetch_add(1, std::memory_order_relaxed);

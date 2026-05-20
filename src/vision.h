@@ -18,6 +18,8 @@ struct MarkResult {
     // Parsed IplImage header fields (for format diagnostics in the log).
     int    imgW = 0, imgH = 0, imgChannels = 0, imgOrigin = -1, imgStep = 0;
     bool   headerOk = false;
+    // Sparse checksum of the raw frame buffer (stale-frame diagnostic in the log).
+    unsigned int frameHash = 0;
 };
 
 // frame: an OpenCV 2.4 IplImage* (the native QueryFrame return). We parse the
@@ -35,6 +37,12 @@ struct MarkResult {
 MarkResult detect_circle_mark(const void* frame, int markSizePx,
                               double refX = -1.0, double refY = -1.0,
                               int searchRadiusPx = 0);
+
+// Cheap sparse FNV-1a hash of an IplImage* frame buffer (samples a grid). Two
+// reads with the same hash are (almost certainly) the same camera frame — used
+// to detect stale/duplicate frames from QueryFrame. Returns 0 for an invalid or
+// null frame; any valid frame hashes to non-zero.
+unsigned int frame_hash(const void* frame);
 
 // Save an IplImage* frame to `path` (PNG) without modifying the buffer — we
 // must NOT use the original mySaveImage, which flips the buffer in place.
