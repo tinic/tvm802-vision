@@ -9,8 +9,8 @@ at high head speed.
 > Developed and tested on a **TVM802B**. The TVM802A shares the same vision DLL
 > and analog capture path, so this should apply to it as well (the 802A is the
 > more common model) — but it is currently **untested on the 802A**; reports
-> welcome. You may need to retune the radius bracket / mark size for your board's
-> fiducials (see *Tuning*).
+> welcome. For a different fiducial size, set the app's **mark-size setting** to
+> match (the detector scales with it — see *Tuning*).
 
 > **Not affiliated with QiHe.** This is an independent, interoperability-focused
 > reimplementation. **You must supply your own original `MVision.dll`** — no
@@ -48,6 +48,17 @@ through to the original, unchanged.
   `vcpkg install opencv4:x86-windows-static`
 - Your **original `MVision.dll`** from your machine.
 
+## Prebuilt binary
+
+Don't want to build it yourself? CI builds `MVision.dll` (x86, self-contained —
+static OpenCV) on every push:
+
+- **Latest:** the **Actions** tab → newest `build` run → `MVision-x86` artifact.
+- **Tagged releases:** the **Releases** page (the DLL is attached to each `v*` tag).
+
+You still need to supply your own original `MVision.dll` (renamed
+`MVision-orig.dll`) — see *Install*.
+
 ## Build
 
 1. Install OpenCV: `vcpkg install opencv4:x86-windows-static`
@@ -69,9 +80,12 @@ With the SurfaceMount application **closed**:
 
 ## Tuning (`src/vision.cpp`)
 
-- **Radius bracket** `0.22–0.42 × size` (the host's mark "size" argument). Keep
-  the app's mark-size setting near its default so the bracket tracks the copper
-  pad's pixel radius.
+- **Mark size** is set in the app's UI, *not* in code: the detection radius
+  bracket is computed as `0.22–0.42 × size` where `size` is the host's mark
+  "size" argument. So a different fiducial *size* is handled by the UI setting —
+  set it to match your fiducial and the bracket tracks it. The `0.22–0.42`
+  fractions only need editing if the fiducial's *shape/proportion* differs a lot
+  from this copper-pad-in-mask-ring (e.g. a solid disc).
 - **Gates**: circularity, contrast, and search-area constants live near the top
   of `detect_one_field`.
 - **Deinterlace / averaging**: field selection and the settled-averaging
@@ -82,8 +96,9 @@ With the SurfaceMount application **closed**:
 - Developed on a **Gen-2 802B**: two analog cameras → CD4052 mux → Syntek
   STK1150 USB capture, 640×480 grayscale. Other capture hardware (e.g. some
   802A revisions) may behave differently.
-- The fiducial target is the **1 mm copper pad**; the detector is tuned for that.
-  A different fiducial size needs a radius-bracket / mark-size adjustment.
+- The fiducial target is the **1 mm copper pad**. Different fiducial *sizes* are
+  handled by the app's mark-size setting (the radius bracket scales with it); see
+  *Tuning*. Only a very different fiducial *shape* needs a code-level tweak.
 - The coordinate convention (180° down-mirror, sub-pixel crop, offset signs) was
   recovered by reverse engineering and matched to the original DLL's behavior.
 
