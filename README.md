@@ -62,9 +62,10 @@ one is less work than the last. Contributions and test reports (especially on th
 ## Requirements
 
 - **32-bit (x86)** build — it must match the host process.
-- MSVC (Visual Studio Build Tools) and CMake.
-- OpenCV 4.x, x86 **static**, via vcpkg:
-  `vcpkg install opencv4:x86-windows-static`
+- MSVC (Visual Studio Build Tools), CMake, and **vcpkg**.
+- OpenCV is declared in `vcpkg.json` (minimal: core / imgproc / imgcodecs, x86
+  **static**) and installed automatically by the vcpkg toolchain — no manual
+  `vcpkg install` needed, and no `dnn`/protobuf pulled in.
 - Your **original `MVision.dll`** from your machine.
 
 ## Prebuilt binary
@@ -80,13 +81,17 @@ You still need to supply your own original `MVision.dll` (renamed
 
 ## Build
 
-1. Install OpenCV: `vcpkg install opencv4:x86-windows-static`
-2. Edit `build-cmake.bat` so `OpenCV_DIR` points at your vcpkg install
-   (e.g. `C:/vcpkg/installed/x86-windows-static/share/opencv4`).
-3. Run `build-cmake.bat` from an x86 toolchain environment.
-   Output: `build\MVision.dll`.
+Set `VCPKG_ROOT` to your vcpkg checkout, then run **`build-cmake.bat`** — it pins
+the vcpkg baseline, installs the minimal OpenCV from `vcpkg.json`, and builds.
+Output: `build\Release\MVision.dll`.
 
-(Or configure CMake directly with the x86 MSVC toolchain and `-DOpenCV_DIR=...`.)
+Or directly:
+
+    vcpkg x-update-baseline --add-initial-baseline
+    cmake -S . -B build -A Win32 ^
+      -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake ^
+      -DVCPKG_TARGET_TRIPLET=x86-windows-static
+    cmake --build build --config Release
 
 ## Install
 

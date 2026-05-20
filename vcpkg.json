@@ -1,0 +1,11 @@
+{
+  "name": "tvm802-vision",
+  "version": "1.0.0",
+  "dependencies": [
+    {
+      "name": "opencv4",
+      "default-features": false,
+      "features": ["png"]
+    }
+  ]
+}
