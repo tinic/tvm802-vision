@@ -35,7 +35,12 @@ target_link_libraries(MVision PRIVATE ${OpenCV_LIBS} kernel32 user32)
 
 target_compile_definitions(MVision PRIVATE _CRT_SECURE_NO_WARNINGS)
 if(MSVC)
-    target_compile_options(MVision PRIVATE /W4 /permissive- /Zc:__cplusplus /EHsc /O2)
+    # /O2 optimize; /fp:contract allow FMA; /arch:AVX2 vectorize our own inner
+    # loops (circularity ring, contrast window, centroid reduce) -- OpenCV is
+    # precompiled with its own CPU dispatch. Requires an AVX2-capable CPU at
+    # runtime (anything from ~2015 / Haswell+ / Zen+).
+    target_compile_options(MVision PRIVATE /W4 /permissive- /Zc:__cplusplus /EHsc
+                           /O2 /fp:contract /arch:AVX2)
 endif()
 
 # Exports: __declspec(dllexport) in source auto-emits _Name@N stdcall names.
