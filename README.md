@@ -18,16 +18,23 @@ at high head speed.
 
 ## What it does
 
+- Handles **both down-vision mark modes**: **Circular** fiducial detection (Hough)
+  and **ImageTemplate** template-match (for square / cross / text / arbitrary mark
+  shapes). Both are field-aware and share the same sub-pixel offset plumbing.
 - Locks the **1 mm copper fiducial pad** with a tight Hough radius bracket, so it
   ignores the larger concentric solder-mask ring that made the stock detection
   "jitter" (the detector was flip-flopping between the two circles).
 - **Deinterlaces** the analog capture and detects on *both* fields independently
   — each field is a single instant in time, so a moving target no longer combs
-  into a "double image". Robust at high job speed.
+  into a "double image". Robust at high job speed (the template-match path is
+  field-aware too — it matches each field, not the combed frame).
 - **Bilateral denoise before CLAHE** → cleans analog sensor noise without
   softening the copper edge, for a sub-pixel center.
 - **Averages both fields when settled** → recovers full vertical resolution and
   cancels the per-field bias, for sub-pixel placement accuracy.
+- **Fresh-frame / settle guard** → discards the stale duplicate frames the USB
+  capture hands back when polled faster than it delivers, and lets the head ring
+  down before the read, for reliable, repeatable lock-in.
 - Renders its **own 1:1 preview overlay** (crisp reference crosshair, search
   circle, and green detection marker).
 
@@ -35,17 +42,23 @@ at high head speed.
 
 It's a **passthrough shim**. It exports the same ABI as the original
 `MVision.dll`, forwards every call it doesn't change to the original (which you
-rename to `MVision-orig.dll`), and overrides only the down-vision fiducial path
-(`CheckMark2` + its preview). `GetOffset`/`GetMin_val` return our result for that
-mode; everything else (up-vision, nozzle, component checks, etc.) passes straight
-through to the original, unchanged.
+rename to `MVision-orig.dll`), and overrides only the down-vision mark paths
+(`CheckMark2` circular detection and `CheckTemplate` template-match, plus their
+preview). `GetOffset`/`GetMin_val` return our result for those modes; everything
+else (up-vision, nozzle, component checks, etc.) passes straight through to the
+original, unchanged.
 
 ## Status & roadmap
 
 This project is replacing the TVM802's weak stock vision one camera path at a
 time, all through the same passthrough shim:
 
-- [x] **Down-vision fiducial detection** (`CheckMark2`) — done; this release.
+- [x] **Down-vision fiducial detection** (`CheckMark2`, circular) — done.
+- [x] **Down-vision template-match** (`CheckTemplate`, ImageTemplate mode) — done;
+  field-aware multi-scale SQDIFF for non-circular / arbitrary mark shapes. New in
+  this release.
+- [ ] **Down-vision Round mark** (`CheckMark`) — the one remaining down-vision
+  mode still passing through to the original; small, reuses the circular pipeline.
 - [ ] **Nozzle detection** (`CheckNozzle`) — planned, likely next. The nozzle
   tip/bore is a circular feature, so it reuses most of the fiducial pipeline
   (Hough circle + sub-pixel center + both-field deinterlace + bilateral denoise),
@@ -112,8 +125,11 @@ With the SurfaceMount application **closed**:
   from this copper-pad-in-mask-ring (e.g. a solid disc).
 - **Gates**: circularity, contrast, and search-area constants live near the top
   of `detect_one_field`.
-- **Deinterlace / averaging**: field selection and the settled-averaging
-  threshold are in `detect_circle_mark`.
+- **Template-match (ImageTemplate)**: the SQDIFF accept threshold, multi-scale
+  sweep, and parabolic sub-pixel refine are in `detect_template_one_field`;
+  `detect_template_mark` preps the template and runs it field-aware.
+- **Deinterlace / averaging**: field split, settled-averaging threshold, and the
+  moving-frame field choice live in `detect_with_fields` (shared by both modes).
 
 ## Caveats
 
