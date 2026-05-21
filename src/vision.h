@@ -1,23 +1,26 @@
 #pragma once
-// Modern OpenCV-based fiducial detector. Phase 1B.
+// Modern OpenCV-based down-vision fiducial detector.
 //
-// For the shadow-comparison build this runs alongside the original CheckMark
-// and only logs; once validated it will drive the result. Kept free of the
-// rest of the DLL so it can be unit-tested against captured BMP frames offline.
+// Drives the host's placement result (via the shim's GetOffset plumbing) for the
+// Circular (CheckMark2) and ImageTemplate (CheckTemplate) down-vision modes. The
+// detector depends only on OpenCV — no Windows headers; the GDI preview lives in
+// preview.cpp — so it can be unit-tested against captured PNG frames off-target
+// (see tests/).
 
 namespace vis {
 
 struct MarkResult {
-    bool   found  = false;
-    double cx     = 0;   // detected center, image pixels, top-left origin, top-down
-    double cy     = 0;
+    bool found = false;
+    double cx = 0;  // detected center, image pixels, top-left origin, top-down
+    double cy = 0;
     double radius = 0;
-    double score  = 0;   // 0..1 proximity-to-reference (higher = nearer)
-    double quality = 0;  // 0..1 detection quality (circ. edge-support / match corr)
-    double imgMean = 0;  // frame brightness; near-0 => dropped/black frame
+    // Detection quality: circularity edge-support fraction (higher = better) for
+    // Circular, or the SQDIFF match value (lower = better) for ImageTemplate.
+    // Diagnostic only — surfaced by the test harness; not used to drive placement.
+    double quality = 0;
     // Parsed IplImage header fields (for format diagnostics in the log).
-    int    imgW = 0, imgH = 0, imgChannels = 0, imgOrigin = -1, imgStep = 0;
-    bool   headerOk = false;
+    int imgW = 0, imgH = 0, imgOrigin = -1;
+    bool headerOk = false;
     // Sparse checksum of the raw frame buffer (stale-frame diagnostic in the log).
     unsigned int frameHash = 0;
 };
@@ -43,6 +46,10 @@ MarkResult detect_circle_mark(const void* frame, int markSizePx,
 // to detect stale/duplicate frames from QueryFrame. Returns 0 for an invalid or
 // null frame; any valid frame hashes to non-zero.
 unsigned int frame_hash(const void* frame);
+
+// Read the frame's pixel dimensions from its IplImage header (no buffer access).
+// Returns false and leaves *w/*h untouched if the header is missing/unsupported.
+bool frame_size(const void* frame, int* w, int* h);
 
 // Template match for the down-vision mark (ImageTemplate mode). templateBytes:
 // the host's CheckTemplate buffer; plane0 (size*size, widthStep aligned to 4) is
@@ -73,4 +80,4 @@ bool save_frame(const void* frame, const char* path);
 bool render_preview(const void* frame, void* hwnd, double mvoX, double mvoY,
                     int searchRadiusPx, const MarkResult& mr);
 
-} // namespace vis
+}  // namespace vis

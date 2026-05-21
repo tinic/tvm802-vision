@@ -1,145 +1,126 @@
 #include "vision.h"
 
+#include "iplframe.h"
+
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/imgcodecs.hpp>
-#include <opencv2/core/types_c.h>  // IplImage (frozen ABI, matches OpenCV 2.4)
 
-#define NOMINMAX                   // keep std::min/std::max usable
-#include <windows.h>               // GDI for self-render (defines `small`, `min`, `max`)
-#include <vector>
 #include <algorithm>
 #include <cmath>
 #include <functional>
-
-namespace {
-// Validate an IplImage* and wrap its pixel buffer in a cv::Mat (no copy).
-// Returns an empty Mat on failure. Reads only — never modifies the buffer.
-cv::Mat wrap_ipl(const void* frame, int& origin) {
-    origin = -1;
-    if (!frame) return {};
-    const IplImage* ipl = reinterpret_cast<const IplImage*>(frame);
-    if (ipl->nSize != sizeof(IplImage)) return {};
-    if (ipl->width <= 0 || ipl->height <= 0) return {};
-    if (ipl->width > 8192 || ipl->height > 8192) return {};
-    if (ipl->nChannels != 1 && ipl->nChannels != 3) return {};
-    if (ipl->depth != IPL_DEPTH_8U) return {};
-    if (!ipl->imageData) return {};
-    origin = ipl->origin;
-    return cv::Mat(ipl->height, ipl->width, CV_MAKETYPE(CV_8U, ipl->nChannels),
-                   ipl->imageData, static_cast<size_t>(ipl->widthStep));
-}
-} // namespace
+#include <vector>
 
 namespace vis {
 
+namespace {
+using detail::as_valid_ipl;
+using detail::wrap_ipl;
+
+// ---- Tuning constants -------------------------------------------------------
+// The values the README's "Tuning" section refers to live here, in one place,
+// instead of being scattered through the detector bodies. Changing detection
+// behavior should mean editing this block — not hunting for literals inline.
+// (Fixed DSP kernel sizes — median 3, bilateral 5/25/25, CLAHE 3.0/8x8, the 3x3
+// blur — stay inline below: they are filter choices, not detection knobs.)
+
+struct CircleParams {
+    // Radius bracket as a fraction of the host mark "size" arg. Locks the inner
+    // 1mm copper (~0.32*size); excludes the larger solder-mask ring (~0.63*size)
+    // that otherwise causes flip-flop jitter.
+    double radiusMinFrac = 0.22, radiusMaxFrac = 0.42;
+    int radiusMinPx = 8;                    // floor on the min radius
+    int markSizeLo = 16, markSizeHi = 400;  // valid host "size" range
+    int radiusFallbackMin = 12, radiusFallbackMax = 28;
+    // Frame / search gates.
+    double meanLo = 6.0, meanHi = 250.0;  // dropped (black) / blown (white)
+    int searchFallbackPx = 150;           // when the host "Range" is unset
+    int roiPad = 6;                       // ROI = search + maxR + pad
+    int roiMinSlackPx = 8;                // ROI must exceed 2*minR by this
+    // HoughCircles.
+    double houghDp = 1.0;
+    int houghParam1 = 80, houghParam2 = 25;
+    // Circularity gate: edge support sampled around the circumference.
+    int circSamples = 24, circRingDelta = 3, circEdgeDelta = 18;
+    double circEdgeFrac = 0.70;
+    // Contrast gate: a solid copper blob vs. its surrounding annulus.
+    int contrastPad = 4;
+    double contrastInnerFrac = 0.36, contrastOuterLo = 1.32, contrastOuterHi = 2.25;
+    double contrastMinDelta = 28.0;
+    // Sub-pixel intensity-weighted centroid refine.
+    double refineWindowFrac = 1.3, refineMaxShiftFrac = 0.7;
+    int refineWindowPad = 4;
+};
+constexpr CircleParams kCircle;
+
+struct TemplateParams {
+    double meanLo = 6.0, meanHi = 250.0;  // dropped / blown
+    int blurKernel = 5;                   // pre-match smoothing
+    int searchMinPx = 8;                  // host "Range" honored above this
+    int searchFallbackPx = 150;
+    int roiPad = 6;  // ROI = search + size/2 + pad
+    // Multi-scale SQDIFF sweep (matchTemplate is not scale-invariant).
+    double scaleLockLo = 0.4, scaleLockHi = 1.4;  // a cached scale in range = locked
+    double scaleSweepLo = 0.5, scaleSweepHi = 1.3001, scaleStep = 0.1;
+    double scaleResweepThresh = 0.42;  // locked scale this bad -> re-sweep
+    int minTemplateDim = 10;
+    // Accept bar: SQDIFF must be <= acceptBase - acceptPerStrength * strength
+    // (strength 1 -> 0.545 loose, strength 10 -> 0.23 strict).
+    double acceptBase = 0.58, acceptPerStrength = 0.035;
+    int strengthLo = 1, strengthHi = 10, strengthDefault = 5;
+};
+constexpr TemplateParams kTmpl;
+
+// Two deinterlaced fields whose detected centers are within this many pixels are
+// treated as settled and averaged; otherwise only the newest field is reported.
+constexpr double kSettleAgreePx = 4.0;
+
+// Copy a per-field detection into the combined result (the fields shared by both
+// detectors). Used by detect_with_fields' combine branches.
+void assign_result(MarkResult& dst, const MarkResult& src) {
+    dst.found = true;
+    dst.cx = src.cx;
+    dst.cy = src.cy;
+    dst.radius = src.radius;
+    dst.quality = src.quality;
+}
+}  // namespace
+
 unsigned int frame_hash(const void* frame) {
-    if (!frame) return 0;
-    const IplImage* ipl = reinterpret_cast<const IplImage*>(frame);
-    if (ipl->nSize != sizeof(IplImage)) return 0;
-    if (ipl->width <= 0 || ipl->height <= 0) return 0;
-    if (ipl->nChannels != 1 && ipl->nChannels != 3) return 0;
-    if (!ipl->imageData) return 0;
-    unsigned int h = 2166136261u;                       // FNV-1a offset basis
+    const IplImage* ipl = as_valid_ipl(frame);
+    if (!ipl) return 0;
+    unsigned int h = 2166136261u;  // FNV-1a offset basis
     const unsigned char* d = reinterpret_cast<const unsigned char*>(ipl->imageData);
     const int ws = ipl->widthStep, rowbytes = ipl->width * ipl->nChannels;
     for (int y = 0; y < ipl->height; y += 37)
         for (int x = 0; x < rowbytes; x += 17)
             h = (h ^ d[y * ws + x]) * 16777619u;
-    return h ? h : 1u;                                  // 0 reserved for invalid
+    return h ? h : 1u;  // 0 reserved for invalid
+}
+
+bool frame_size(const void* frame, int* w, int* h) {
+    const IplImage* ipl = as_valid_ipl(frame);
+    if (!ipl) return false;
+    if (w) *w = ipl->width;
+    if (h) *h = ipl->height;
+    return true;
 }
 
 bool save_frame(const void* frame, const char* path) {
     if (!path) return false;
-    int origin = -1;
-    cv::Mat wrapped = wrap_ipl(frame, origin);
-    if (wrapped.empty()) return false;
-    cv::Mat out;
-    if (origin == IPL_ORIGIN_BL) cv::flip(wrapped, out, 0);  // into a NEW Mat
-    else                         out = wrapped.clone();       // copy; never touch live buffer
-    try { return cv::imwrite(path, out); } catch (...) { return false; }
-}
-
-bool render_preview(const void* frame, void* hwndV, double mvoX, double mvoY,
-                    int searchRadiusPx, const MarkResult& mr) {
-    if (!hwndV) return false;
-    int origin = -1;
-    cv::Mat wrapped = wrap_ipl(frame, origin);
-    if (wrapped.empty()) return false;
-
-    cv::Mat img;
-    if (origin == IPL_ORIGIN_BL) cv::flip(wrapped, img, 0); else img = wrapped;
-    cv::Mat bgr;
-    if (img.channels() == 1)      cv::cvtColor(img, bgr, cv::COLOR_GRAY2BGR);
-    else if (img.channels() == 3) bgr = img;
-    else return false;
-
-    const int W = bgr.cols, H = bgr.rows;
-    cv::Mat flipped;
-    cv::flip(bgr, flipped, -1);                  // 180 deg, matches the original mirror
-
-    HWND hwnd = reinterpret_cast<HWND>(hwndV);
-    HDC dc = GetDC(hwnd);
-    if (!dc) return false;
-    RECT rc{}; GetClientRect(hwnd, &rc);
-    int rw = rc.right - rc.left, rh = rc.bottom - rc.top;
-    if (rw <= 0) rw = W;
-    if (rh <= 0) rh = H;
-
-    // 1:1 NATIVE preview (no upscaling -> crisp overlay; a stretched crop made
-    // the thin red lines blocky). Crop a window-sized region at native pixels,
-    // centered on the reference. Cap the crop to the source minus the mvo offset
-    // so we never run off the frame (no replicated border), and round the width
-    // down to a multiple of 4 so the cv::Mat row stride (cw*3) is DIB-aligned.
-    const double cx = W / 2.0 + mvoX, cy = H / 2.0 + mvoY;   // reference, flipped coords
-    int marginW = W - 2 * static_cast<int>(std::ceil(std::abs(mvoX)));
-    int marginH = H - 2 * static_cast<int>(std::ceil(std::abs(mvoY)));
-    int cw = std::min(rw, marginW > 16 ? marginW : W);
-    int ch = std::min(rh, marginH > 16 ? marginH : H);
-    cw &= ~3;                                   // multiple of 4 -> DIB row aligned
-    if (cw < 16 || ch < 16) { ReleaseDC(hwnd, dc); return false; }
-
-    cv::Mat work;
-    cv::getRectSubPix(flipped, cv::Size(cw, ch),
-                      cv::Point2f((float)cx, (float)cy), work);
-    if (work.type() != CV_8UC3) { ReleaseDC(hwnd, dc); return false; }
-
-    const int RT = 2;   // red overlay thickness (crisp at 1:1, more visible)
-    // Reference crosshair (red) at the crop center == the reference point.
-    cv::line(work, cv::Point(cw / 2, 0), cv::Point(cw / 2, ch), cv::Scalar(0, 0, 255), RT);
-    cv::line(work, cv::Point(0, ch / 2), cv::Point(cw, ch / 2), cv::Scalar(0, 0, 255), RT);
-    // Search-area ("Range") circle (red) — detection is limited to inside this.
-    if (searchRadiusPx > 0)
-        cv::circle(work, cv::Point(cw / 2, ch / 2), searchRadiusPx, cv::Scalar(0, 0, 255), RT);
-
-    // Our detection (green) mapped from frame coords into crop coords.
-    if (mr.found) {
-        const double cropLeft = cx - cw / 2.0;
-        const double cropTop  = cy - ch / 2.0;
-        const int u = cvRound((W - mr.cx) - cropLeft);
-        const int v = cvRound((H - mr.cy) - cropTop);
-        cv::circle(work, cv::Point(u, v), cvRound(mr.radius), cv::Scalar(0, 255, 0), 2);
-        cv::drawMarker(work, cv::Point(u, v), cv::Scalar(0, 255, 0), cv::MARKER_CROSS, 14, 2);
+    try {  // no-throw barrier: never let an OpenCV failure reach the host
+        int origin = -1;
+        cv::Mat wrapped = wrap_ipl(frame, origin);
+        if (wrapped.empty()) return false;
+        cv::Mat out;
+        if (origin == IPL_ORIGIN_BL)
+            cv::flip(wrapped, out, 0);  // into a NEW Mat
+        else
+            out = wrapped.clone();  // copy; never touch live buffer
+        return cv::imwrite(path, out);
+    } catch (...) {
+        return false;
     }
-
-    if (!work.isContinuous()) work = work.clone();
-
-    BITMAPINFO bmi; ZeroMemory(&bmi, sizeof(bmi));
-    bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth       = cw;
-    bmi.bmiHeader.biHeight      = -ch;           // negative = top-down (matches cv::Mat)
-    bmi.bmiHeader.biPlanes      = 1;
-    bmi.bmiHeader.biBitCount    = 24;
-    bmi.bmiHeader.biCompression = BI_RGB;
-    // 1:1 blit (dst size == src size -> no scaling). Top-left; black-fill any
-    // border strips (only when the window is larger than the native crop).
-    SetStretchBltMode(dc, COLORONCOLOR);
-    StretchDIBits(dc, 0, 0, cw, ch, 0, 0, cw, ch, work.data, &bmi, DIB_RGB_COLORS, SRCCOPY);
-    HBRUSH black = (HBRUSH)GetStockObject(BLACK_BRUSH);
-    if (rw > cw) { RECT s{ cw, 0, rw, rh }; FillRect(dc, &s, black); }
-    if (rh > ch) { RECT s{ 0, ch, cw, rh }; FillRect(dc, &s, black); }
-    ReleaseDC(hwnd, dc);
-    return true;
 }
 
 // Detect the copper mark in ONE already-deinterlaced, full-height grayscale
@@ -151,16 +132,17 @@ static MarkResult detect_one_field(const cv::Mat& gFull, int markSizePx,
                                    int searchRadiusPx) {
     MarkResult r;
 
-    // Tight radius bracket locked to the inner 1mm copper (radius ~0.32*size);
-    // excludes the larger solder-mask ring (~0.63*size) that otherwise causes
-    // flip-flop jitter. markSizePx is the host "size" arg (algo=63 ~ 1.2mm).
-    // Computed first so it can size the ROI below.
+    // Tight radius bracket locked to the inner 1mm copper; excludes the larger
+    // solder-mask ring that otherwise causes flip-flop jitter. markSizePx is the
+    // host "size" arg (algo=63 ~ 1.2mm). Computed first so it can size the ROI.
     int minRfull, maxRfull;
-    if (markSizePx >= 16 && markSizePx <= 400) {
-        minRfull = std::max(8, static_cast<int>(markSizePx * 0.22));
-        maxRfull =            static_cast<int>(markSizePx * 0.42);
+    if (markSizePx >= kCircle.markSizeLo && markSizePx <= kCircle.markSizeHi) {
+        minRfull = std::max(kCircle.radiusMinPx,
+                            static_cast<int>(markSizePx * kCircle.radiusMinFrac));
+        maxRfull = static_cast<int>(markSizePx * kCircle.radiusMaxFrac);
     } else {
-        minRfull = 12; maxRfull = 28;
+        minRfull = kCircle.radiusFallbackMin;
+        maxRfull = kCircle.radiusFallbackMax;
     }
 
     // Restrict the WHOLE pipeline to a ROI around the reference. The mark is
@@ -170,19 +152,19 @@ static MarkResult detect_one_field(const cv::Mat& gFull, int markSizePx,
     // ROI too small) -> use the full field.
     const double rxF = (refX >= 0.0) ? refX : gFull.cols / 2.0;
     const double ryF = (refY >= 0.0) ? refY : gFull.rows / 2.0;
-    const int sr = (searchRadiusPx > 0) ? searchRadiusPx : 150;
+    const int sr = (searchRadiusPx > 0) ? searchRadiusPx : kCircle.searchFallbackPx;
     cv::Rect crop(0, 0, gFull.cols, gFull.rows);
     if (refX >= 0.0 && refY >= 0.0) {
-        const int R = sr + maxRfull + 6;
-        cv::Rect c = cv::Rect(cvRound(rxF) - R, cvRound(ryF) - R, 2 * R, 2 * R)
-                     & cv::Rect(0, 0, gFull.cols, gFull.rows);
-        if (c.width >= 2 * minRfull + 8 && c.height >= 2 * minRfull + 8) crop = c;
+        const int R = sr + maxRfull + kCircle.roiPad;
+        cv::Rect c = cv::Rect(cvRound(rxF) - R, cvRound(ryF) - R, 2 * R, 2 * R) & cv::Rect(0, 0, gFull.cols, gFull.rows);
+        const int slack = 2 * minRfull + kCircle.roiMinSlackPx;
+        if (c.width >= slack && c.height >= slack) crop = c;
     }
     const cv::Mat g = gFull(crop);
-    const double cxRef = rxF - crop.x, cyRef = ryF - crop.y;   // reference in crop coords
+    const double cxRef = rxF - crop.x, cyRef = ryF - crop.y;  // reference in crop coords
 
-    r.imgMean = cv::mean(g)[0];
-    if (r.imgMean < 6.0 || r.imgMean > 250.0) return r;   // dropped/blown
+    const double imgMean = cv::mean(g)[0];
+    if (imgMean < kCircle.meanLo || imgMean > kCircle.meanHi) return r;  // dropped/blown
 
     // Denoise -> illumination normalize -> light smooth. Denoise BEFORE CLAHE
     // (CLAHE amplifies noise). medianBlur kills analog impulse pixels; the
@@ -195,16 +177,20 @@ static MarkResult detect_one_field(const cv::Mat& gFull, int markSizePx,
     cv::GaussianBlur(norm, det, cv::Size(3, 3), 1.0);
 
     std::vector<cv::Vec3f> circles;
-    cv::HoughCircles(det, circles, cv::HOUGH_GRADIENT, /*dp*/ 1.0,
-                     /*minDist*/ std::max(8.0, det.rows / 4.0), /*param1*/ 80,
-                     /*param2*/ 25, /*minRadius*/ minRfull, /*maxRadius*/ maxRfull);
+    cv::HoughCircles(det, circles, cv::HOUGH_GRADIENT, kCircle.houghDp,
+                     /*minDist*/ std::max(8.0, det.rows / 4.0), kCircle.houghParam1,
+                     kCircle.houghParam2, minRfull, maxRfull);
     if (circles.empty()) return r;
 
-    int best = 0; double bestD = 1e18;
+    int best = 0;
+    double bestD = 1e18;
     for (size_t i = 0; i < circles.size(); ++i) {
         const double dx = circles[i][0] - cxRef, dy = circles[i][1] - cyRef;
         const double d = dx * dx + dy * dy;
-        if (d < bestD) { bestD = d; best = static_cast<int>(i); }
+        if (d < bestD) {
+            bestD = d;
+            best = static_cast<int>(i);
+        }
     }
     double fx = circles[best][0], fy = circles[best][1], fr = circles[best][2];
 
@@ -216,43 +202,54 @@ static MarkResult detect_one_field(const cv::Mat& gFull, int markSizePx,
     }
 
     // Circularity: reject HoughCircles votes on rectangular pads (need a real
-    // edge around most of the circumference). The edge-support fraction also
-    // doubles as a detection-quality score (used for the even/odd tiebreak).
+    // edge around most of the circumference). The edge-support fraction is also
+    // surfaced as MarkResult::quality (diagnostic only — see the test harness).
     double circQuality = 0.0;
     {
-        const int N = 24; int hits = 0, valid = 0;
+        const int N = kCircle.circSamples;
+        int hits = 0, valid = 0;
         for (int k = 0; k < N; ++k) {
             const double a = 2.0 * CV_PI * k / N, ca = std::cos(a), sa = std::sin(a);
-            const int xin = cvRound(fx + (fr - 3) * ca), yin = cvRound(fy + (fr - 3) * sa);
-            const int xou = cvRound(fx + (fr + 3) * ca), you = cvRound(fy + (fr + 3) * sa);
+            const int xin = cvRound(fx + (fr - kCircle.circRingDelta) * ca);
+            const int yin = cvRound(fy + (fr - kCircle.circRingDelta) * sa);
+            const int xou = cvRound(fx + (fr + kCircle.circRingDelta) * ca);
+            const int you = cvRound(fy + (fr + kCircle.circRingDelta) * sa);
             if (xin < 0 || yin < 0 || xin >= det.cols || yin >= det.rows) continue;
             if (xou < 0 || you < 0 || xou >= det.cols || you >= det.rows) continue;
             ++valid;
-            if (std::abs(int(det.at<uchar>(yin, xin)) - int(det.at<uchar>(you, xou))) > 18)
+            if (std::abs(int(det.at<uchar>(yin, xin)) - int(det.at<uchar>(you, xou))) > kCircle.circEdgeDelta)
                 ++hits;
         }
-        if (valid < N / 2 || hits < 0.70 * valid) return r;
+        if (valid < N / 2 || hits < kCircle.circEdgeFrac * valid) return r;
         circQuality = double(hits) / valid;
     }
 
     // Contrast gate: a real copper dot is a solid bright/dark blob vs annulus.
     {
         const int rr = std::max(2, int(fr));
-        double sin_ = 0, sout = 0; int nin = 0, nout = 0;
-        for (int dy = -rr - 4; dy <= rr + 4; ++dy)
-            for (int dx = -rr - 4; dx <= rr + 4; ++dx) {
+        double sin_ = 0, sout = 0;
+        int nin = 0, nout = 0;
+        for (int dy = -rr - kCircle.contrastPad; dy <= rr + kCircle.contrastPad; ++dy)
+            for (int dx = -rr - kCircle.contrastPad; dx <= rr + kCircle.contrastPad; ++dx) {
                 const int xx = cvRound(fx) + dx, yy = cvRound(fy) + dy;
                 if (xx < 0 || yy < 0 || xx >= det.cols || yy >= det.rows) continue;
                 const double d2 = double(dx) * dx + double(dy) * dy;
-                if (d2 < 0.36 * rr * rr) { sin_ += det.at<uchar>(yy, xx); ++nin; }
-                else if (d2 > 1.32 * rr * rr && d2 < 2.25 * rr * rr) { sout += det.at<uchar>(yy, xx); ++nout; }
+                if (d2 < kCircle.contrastInnerFrac * rr * rr) {
+                    sin_ += det.at<uchar>(yy, xx);
+                    ++nin;
+                } else if (d2 > kCircle.contrastOuterLo * rr * rr &&
+                           d2 < kCircle.contrastOuterHi * rr * rr) {
+                    sout += det.at<uchar>(yy, xx);
+                    ++nout;
+                }
             }
-        if (nin > 0 && nout > 0 && std::abs(sin_ / nin - sout / nout) < 28.0)
+        if (nin > 0 && nout > 0 &&
+            std::abs(sin_ / nin - sout / nout) < kCircle.contrastMinDelta)
             return r;
     }
 
     // Sub-pixel refine: intensity-weighted centroid around the Hough center.
-    const int m = static_cast<int>(fr * 1.3) + 4;
+    const int m = static_cast<int>(fr * kCircle.refineWindowFrac) + kCircle.refineWindowPad;
     cv::Rect roi(cvRound(fx) - m, cvRound(fy) - m, 2 * m, 2 * m);
     roi &= cv::Rect(0, 0, norm.cols, norm.rows);
     if (roi.width > 6 && roi.height > 6) {
@@ -270,19 +267,19 @@ static MarkResult detect_one_field(const cv::Mat& gFull, int markSizePx,
             for (int x = 0; x < colW.cols; ++x) sx += colW.at<double>(0, x) * x;
             for (int y = 0; y < rowW.rows; ++y) sy += rowW.at<double>(y, 0) * y;
             const double rx = roi.x + sx / sw, ry = roi.y + sy / sw;
-            if (std::abs(rx - fx) <= fr * 0.7 && std::abs(ry - fy) <= fr * 0.7) {
-                fx = rx; fy = ry;
+            if (std::abs(rx - fx) <= fr * kCircle.refineMaxShiftFrac &&
+                std::abs(ry - fy) <= fr * kCircle.refineMaxShiftFrac) {
+                fx = rx;
+                fy = ry;
             }
         }
     }
 
     r.found = true;
-    r.cx = fx + crop.x;          // map crop coords -> field coords
+    r.cx = fx + crop.x;  // map crop coords -> field coords
     r.cy = fy + crop.y;
     r.radius = fr;
     r.quality = circQuality;
-    const double maxD = std::sqrt(rxF * rxF + ryF * ryF);
-    r.score = 1.0 - std::sqrt(bestD) / maxD;   // bestD is crop-relative = field-relative dist
     return r;
 }
 
@@ -299,89 +296,93 @@ static MarkResult detect_one_field(const cv::Mat& gFull, int markSizePx,
 // +-0.5 row correction and combines. Reused by every field-aware detector
 // (circular, template, ...). NON-DESTRUCTIVE: copies out of the frame buffer.
 static MarkResult detect_with_fields(
-        const void* frame,
-        const std::function<MarkResult(const cv::Mat&)>& perField) {
+    const void* frame,
+    const std::function<MarkResult(const cv::Mat&)>& perField) {
     MarkResult r;
-    if (!frame) return r;
 
-    // The native QueryFrame returns an OpenCV 2.4 IplImage*. Its struct layout
-    // is ABI-frozen, so OpenCV 4's IplImage matches it. Validate before trusting.
-    const IplImage* ipl = reinterpret_cast<const IplImage*>(frame);
-    if (ipl->nSize != sizeof(IplImage)) return r;          // not an IplImage
-    if (ipl->width <= 0 || ipl->height <= 0) return r;
-    if (ipl->width > 8192 || ipl->height > 8192) return r;
-    if (ipl->nChannels != 1 && ipl->nChannels != 3) return r;
-    if (ipl->depth != IPL_DEPTH_8U) return r;
-    if (!ipl->imageData) return r;
+    const IplImage* ipl = as_valid_ipl(frame);
+    if (!ipl) return r;
 
-    r.headerOk    = true;
-    r.imgW        = ipl->width;
-    r.imgH        = ipl->height;
-    r.imgChannels = ipl->nChannels;
-    r.imgOrigin   = ipl->origin;
-    r.imgStep     = ipl->widthStep;
+    r.headerOk = true;
+    r.imgW = ipl->width;
+    r.imgH = ipl->height;
+    r.imgOrigin = ipl->origin;
 
-    r.frameHash = frame_hash(frame);   // stale-frame diagnostic (see compare.log)
+    r.frameHash = frame_hash(frame);  // stale-frame diagnostic (see compare.log)
 
-    cv::Mat wrapped(ipl->height, ipl->width,
-                    CV_MAKETYPE(CV_8U, ipl->nChannels),
-                    ipl->imageData, static_cast<size_t>(ipl->widthStep));
+    // A frame too small to split into two fields would make the deinterlace
+    // resize throw on a 0-row field. Real captures are 640x480; anything below a
+    // few pixels is a malformed header -> report not-found rather than risk it.
+    if (ipl->height < 4 || ipl->width < 4) return r;
 
-    // IplImage origin: 0 = top-left (top-down), 1 = bottom-left (bottom-up).
-    cv::Mat img;
-    if (ipl->origin == IPL_ORIGIN_BL) cv::flip(wrapped, img, 0);
-    else                              img = wrapped;
+    // EXCEPTION BARRIER: this module is called across a plain C ABI from the host
+    // (SurfaceMount.exe). An OpenCV/STL exception (corrupt frame, out-of-memory,
+    // failed assertion) unwinding past that boundary is undefined behavior. Catch
+    // everything here and report "not found", which the host already handles.
+    try {
+        cv::Mat wrapped(ipl->height, ipl->width,
+                        CV_MAKETYPE(CV_8U, ipl->nChannels),
+                        ipl->imageData, static_cast<size_t>(ipl->widthStep));
 
-    cv::Mat gray;
-    if (img.channels() == 3) cv::cvtColor(img, gray, cv::COLOR_BGR2GRAY);
-    else                     gray = img;
+        // IplImage origin: 0 = top-left (top-down), 1 = bottom-left (bottom-up).
+        cv::Mat img;
+        if (ipl->origin == IPL_ORIGIN_BL)
+            cv::flip(wrapped, img, 0);
+        else
+            img = wrapped;
 
-    const size_t step = gray.step[0];
-    cv::Mat evenF, oddF, evenU, oddU;
-    cv::Mat(gray.rows / 2, gray.cols, gray.type(), gray.data,        step * 2).copyTo(evenF);
-    cv::Mat(gray.rows / 2, gray.cols, gray.type(), gray.data + step, step * 2).copyTo(oddF);
-    // Bob-deinterlace each half-height field back to full height. INTER_CUBIC
-    // (not LINEAR) preserves the copper edge sharpness that HoughCircles' param2
-    // accumulator and the circularity ring-sample at fr+-3 both rely on; the
-    // ~1px vertical softening from bilinear blunts both. Two small resizes/frame
-    // -> negligible cost.
-    cv::resize(evenF, evenU, cv::Size(gray.cols, gray.rows), 0, 0, cv::INTER_CUBIC);
-    cv::resize(oddF,  oddU,  cv::Size(gray.cols, gray.rows), 0, 0, cv::INTER_CUBIC);
+        cv::Mat gray;
+        if (img.channels() == 3)
+            cv::cvtColor(img, gray, cv::COLOR_BGR2GRAY);
+        else
+            gray = img;
 
-    MarkResult re = perField(evenU);
-    MarkResult ro = perField(oddU);
-    if (re.found) re.cy -= 0.5;   // even field samples rows 2i   -> full-frame y
-    if (ro.found) ro.cy += 0.5;   // odd  field samples rows 2i+1 -> full-frame y
+        const size_t step = gray.step[0];
+        cv::Mat evenF, oddF, evenU, oddU;
+        cv::Mat(gray.rows / 2, gray.cols, gray.type(), gray.data, step * 2).copyTo(evenF);
+        cv::Mat(gray.rows / 2, gray.cols, gray.type(), gray.data + step, step * 2).copyTo(oddF);
+        // Bob-deinterlace each half-height field back to full height. INTER_CUBIC
+        // (not LINEAR) preserves the copper edge sharpness that HoughCircles'
+        // param2 accumulator and the circularity ring-sample at fr+-3 both rely
+        // on; the ~1px vertical softening from bilinear blunts both. Two small
+        // resizes/frame -> negligible cost.
+        cv::resize(evenF, evenU, cv::Size(gray.cols, gray.rows), 0, 0, cv::INTER_CUBIC);
+        cv::resize(oddF, oddU, cv::Size(gray.cols, gray.rows), 0, 0, cv::INTER_CUBIC);
 
-    // The two fields are captured ~1/60 s apart. Combine them by motion state:
-    //  - settled (fields agree): AVERAGE -> full vertical resolution, cancels
-    //    the opposite +-0.5 row bias.
-    //  - moving (fields disagree): report ONLY the most-recent field; the older
-    //    field carries a stale head position that misdirects the host's
-    //    correction. These cameras are bottom-field-first (BFF): the bottom field
-    //    = odd rows (1,3,5) is captured FIRST (older); the top field = even rows
-    //    (0,2,4) is the most recent. So under motion we report the EVEN field.
-    //    (In normal operation this branch is rare -- the host only reads vision
-    //    at a move endpoint, so frames are almost always settled.)
-    if (re.found && ro.found) {
-        const double dx = re.cx - ro.cx, dy = re.cy - ro.cy;
-        if (dx * dx + dy * dy <= 4.0 * 4.0) {
-            r.found = true;
-            r.cx = 0.5 * (re.cx + ro.cx);
-            r.cy = 0.5 * (re.cy + ro.cy);
-            r.radius = 0.5 * (re.radius + ro.radius);
-            r.score = std::max(re.score, ro.score);
-            r.quality = std::max(re.quality, ro.quality);
-        } else {
-            r.found = true; r.cx = re.cx; r.cy = re.cy; r.radius = re.radius;
-            r.score = re.score; r.quality = re.quality;     // BFF: even is newest
+        MarkResult re = perField(evenU);
+        MarkResult ro = perField(oddU);
+        if (re.found) re.cy -= 0.5;  // even field samples rows 2i   -> full-frame y
+        if (ro.found) ro.cy += 0.5;  // odd  field samples rows 2i+1 -> full-frame y
+
+        // The two fields are captured ~1/60 s apart. Combine them by motion state:
+        //  - settled (fields agree): AVERAGE -> full vertical resolution, cancels
+        //    the opposite +-0.5 row bias.
+        //  - moving (fields disagree): report ONLY the most-recent field; the
+        //    older field carries a stale head position that misdirects the host's
+        //    correction. These cameras are bottom-field-first (BFF): the bottom
+        //    field = odd rows (1,3,5) is captured FIRST (older); the top field =
+        //    even rows (0,2,4) is the most recent. So under motion we report the
+        //    EVEN field. (In normal operation this branch is rare -- the host only
+        //    reads vision at a move endpoint, so frames are almost always settled.)
+        if (re.found && ro.found) {
+            const double dx = re.cx - ro.cx, dy = re.cy - ro.cy;
+            if (dx * dx + dy * dy <= kSettleAgreePx * kSettleAgreePx) {
+                r.found = true;
+                r.cx = 0.5 * (re.cx + ro.cx);
+                r.cy = 0.5 * (re.cy + ro.cy);
+                r.radius = 0.5 * (re.radius + ro.radius);
+                r.quality = std::max(re.quality, ro.quality);
+            } else {
+                assign_result(r, re);  // BFF: even is newest
+            }
+        } else if (re.found) {
+            assign_result(r, re);
+        } else if (ro.found) {
+            assign_result(r, ro);
         }
-    } else if (re.found) {
-        r.found = true; r.cx = re.cx; r.cy = re.cy; r.radius = re.radius; r.score = re.score; r.quality = re.quality;
-    } else if (ro.found) {
-        r.found = true; r.cx = ro.cx; r.cy = ro.cy; r.radius = ro.radius; r.score = ro.score; r.quality = ro.quality;
+    } catch (...) {
+        r.found = false;  // never let an exception reach the host
     }
-    r.imgMean = re.imgMean;   // even-field mean (~frame brightness); no full-frame recompute
     return r;
 }
 
@@ -403,19 +404,19 @@ static MarkResult detect_template_one_field(const cv::Mat& g, const cv::Mat& tb,
                                             double refX, double refY,
                                             int searchRadiusPx, double* ioScale) {
     MarkResult r;
-    r.imgMean = cv::mean(g)[0];
-    if (r.imgMean < 6.0 || r.imgMean > 250.0) return r;            // dropped/blown
+    const double imgMean = cv::mean(g)[0];
+    if (imgMean < kTmpl.meanLo || imgMean > kTmpl.meanHi) return r;  // dropped/blown
     if (tb.cols >= g.cols || tb.rows >= g.rows) return r;
 
-    cv::Mat gb; cv::GaussianBlur(g, gb, cv::Size(5, 5), 0);        // smooth (no brightness-norm)
+    cv::Mat gb;
+    cv::GaussianBlur(g, gb, cv::Size(kTmpl.blurKernel, kTmpl.blurKernel), 0);  // smooth; no brightness-norm
 
     // Search ROI = the host's Range, honored directly (it's the red preview circle).
     const double rx = (refX >= 0.0) ? refX : g.cols / 2.0;
     const double ry = (refY >= 0.0) ? refY : g.rows / 2.0;
-    const int sr = (searchRadiusPx > 8) ? searchRadiusPx : 150;
-    const int R = sr + size / 2 + 6;
-    cv::Rect crop = cv::Rect(cvRound(rx) - R, cvRound(ry) - R, 2 * R, 2 * R)
-                    & cv::Rect(0, 0, g.cols, g.rows);
+    const int sr = (searchRadiusPx > kTmpl.searchMinPx) ? searchRadiusPx : kTmpl.searchFallbackPx;
+    const int R = sr + size / 2 + kTmpl.roiPad;
+    cv::Rect crop = cv::Rect(cvRound(rx) - R, cvRound(ry) - R, 2 * R, 2 * R) & cv::Rect(0, 0, g.cols, g.rows);
     if (crop.width < size + 2 || crop.height < size + 2) return r;
 
     // Multi-scale SQDIFF: the red ring light blooms the mark differently between
@@ -424,18 +425,24 @@ static MarkResult detect_template_one_field(const cv::Mat& g, const cv::Mat& tb,
     // first good match (ioScale) and only re-sweep if it degrades -- across the
     // two fields this means the even field sweeps and the odd reuses the lock.
     const cv::Mat cropImg = gb(crop);
-    double bestVal = 2.0, bestScl = 1.0; cv::Point bestLoc; int bestW = tb.cols, bestH = tb.rows;
+    double bestVal = 2.0, bestScl = 1.0;
+    cv::Point bestLoc;
+    int bestW = tb.cols, bestH = tb.rows;
     cv::Mat bestResult;
-    const bool locked = (ioScale && *ioScale >= 0.4 && *ioScale <= 1.4);
+    const bool locked = (ioScale && *ioScale >= kTmpl.scaleLockLo && *ioScale <= kTmpl.scaleLockHi);
     for (int pass = 0; pass < 2; ++pass) {
-        const double a = (locked && pass == 0) ? *ioScale : 0.5;
-        const double b = (locked && pass == 0) ? *ioScale : 1.3001;
-        for (double scl = a; scl <= b + 1e-9; scl += 0.1) {
+        const double a = (locked && pass == 0) ? *ioScale : kTmpl.scaleSweepLo;
+        const double b = (locked && pass == 0) ? *ioScale : kTmpl.scaleSweepHi;
+        for (double scl = a; scl <= b + 1e-9; scl += kTmpl.scaleStep) {
             cv::Mat ts;
-            if (std::fabs(scl - 1.0) < 1e-6) ts = tb;
-            else cv::resize(tb, ts, cv::Size(), scl, scl, scl < 1.0 ? cv::INTER_AREA : cv::INTER_LINEAR);
-            if (ts.cols < 10 || ts.rows < 10 || ts.cols >= cropImg.cols || ts.rows >= cropImg.rows) continue;
-            cv::Mat res; cv::matchTemplate(cropImg, ts, res, cv::TM_SQDIFF_NORMED);
+            if (std::fabs(scl - 1.0) < 1e-6)
+                ts = tb;
+            else
+                cv::resize(tb, ts, cv::Size(), scl, scl, scl < 1.0 ? cv::INTER_AREA : cv::INTER_LINEAR);
+            if (ts.cols < kTmpl.minTemplateDim || ts.rows < kTmpl.minTemplateDim ||
+                ts.cols >= cropImg.cols || ts.rows >= cropImg.rows) continue;
+            cv::Mat res;
+            cv::matchTemplate(cropImg, ts, res, cv::TM_SQDIFF_NORMED);
             // Honor the Range as a CIRCLE: accept only peaks whose matched
             // template CENTER lies within sr of the reference.
             cv::Mat mask(res.size(), CV_8U, cv::Scalar(0));
@@ -443,17 +450,29 @@ static MarkResult detect_template_one_field(const cv::Mat& g, const cv::Mat& tb,
                                cvRound(ry) - crop.y - ts.rows / 2);
             cv::circle(mask, mc, sr, cv::Scalar(255), -1);
             if (cv::countNonZero(mask) == 0) continue;
-            double mn; cv::Point ml; cv::minMaxLoc(res, &mn, nullptr, &ml, nullptr, mask);
-            if (mn < bestVal) { bestVal = mn; bestLoc = ml; bestScl = scl; bestW = ts.cols; bestH = ts.rows; bestResult = res; }
+            double mn;
+            cv::Point ml;
+            cv::minMaxLoc(res, &mn, nullptr, &ml, nullptr, mask);
+            if (mn < bestVal) {
+                bestVal = mn;
+                bestLoc = ml;
+                bestScl = scl;
+                bestW = ts.cols;
+                bestH = ts.rows;
+                bestResult = res;
+            }
         }
-        if (!(locked && pass == 0 && bestVal > 0.42)) break;      // locked scale OK, or full sweep done
-        bestVal = 2.0; bestResult.release();                      // stale lock -> full re-sweep
+        if (!(locked && pass == 0 && bestVal > kTmpl.scaleResweepThresh)) break;  // locked scale OK, or full sweep done
+        bestVal = 2.0;
+        bestResult.release();  // stale lock -> full re-sweep
     }
-    r.score = bestVal; r.quality = bestVal;                        // SQDIFF: lower = better
+    r.quality = bestVal;  // SQDIFF: lower = better
 
-    const int s = (strength >= 1 && strength <= 10) ? strength : 5;
-    if (bestResult.empty() || bestVal > 0.58 - 0.035 * s) return r; // s=1->0.545 (loose), s=10->0.23 (strict)
-    if (ioScale) *ioScale = bestScl;                              // remember the working scale
+    const int s = (strength >= kTmpl.strengthLo && strength <= kTmpl.strengthHi)
+                      ? strength
+                      : kTmpl.strengthDefault;
+    if (bestResult.empty() || bestVal > kTmpl.acceptBase - kTmpl.acceptPerStrength * s) return r;
+    if (ioScale) *ioScale = bestScl;  // remember the working scale
 
     // Parabolic sub-pixel refine on the best-scale SQDIFF surface (shape-agnostic).
     const cv::Point ml = bestLoc;
@@ -469,9 +488,9 @@ static MarkResult detect_template_one_field(const cv::Mat& g, const cv::Mat& tb,
         if (std::fabs(den) > 1e-6) dy = 0.5 * (a - c) / den;
     }
 
-    r.found  = true;
-    r.cx     = ml.x + dx + bestW / 2.0 + crop.x;   // full-frame x
-    r.cy     = ml.y + dy + bestH / 2.0 + crop.y;   // field-row y (caller adds +-0.5)
+    r.found = true;
+    r.cx = ml.x + dx + bestW / 2.0 + crop.x;  // full-frame x
+    r.cy = ml.y + dy + bestH / 2.0 + crop.y;  // field-row y (caller adds +-0.5)
     r.radius = std::max(bestW, bestH) / 2.0;
     return r;
 }
@@ -503,12 +522,21 @@ MarkResult detect_template_mark(const void* frame, const unsigned char* template
     // stride), 180-deg flipped (the host stores it rotated 180° relative to our
     // frame — required for asymmetric marks), then pre-blurred to match the
     // per-field 5x5 smoothing.
-    const int step = (size + 3) & ~3;
-    cv::Mat templ;
-    cv::Mat(size, size, CV_8UC1, const_cast<unsigned char*>(templateBytes),
-            static_cast<size_t>(step)).copyTo(templ);
-    cv::flip(templ, templ, -1);
-    cv::Mat tb; cv::GaussianBlur(templ, tb, cv::Size(5, 5), 0);
+    cv::Mat tb;
+    try {
+        const int step = (size + 3) & ~3;
+        cv::Mat templ;
+        cv::Mat(size, size, CV_8UC1, const_cast<unsigned char*>(templateBytes),
+                static_cast<size_t>(step))
+            .copyTo(templ);
+        cv::flip(templ, templ, -1);
+        cv::GaussianBlur(templ, tb, cv::Size(kTmpl.blurKernel, kTmpl.blurKernel), 0);
+    } catch (...) {
+        tb.release();  // malformed template -> fall through to the not-found path
+    }
+    // Prep failed (or produced nothing): still parse/log the frame, report not-found.
+    if (tb.empty())
+        return detect_with_fields(frame, [](const cv::Mat&) { return MarkResult(); });
 
     return detect_with_fields(frame, [&](const cv::Mat& g) {
         return detect_template_one_field(g, tb, size, strength, refX, refY,
@@ -516,4 +544,4 @@ MarkResult detect_template_mark(const void* frame, const unsigned char* template
     });
 }
 
-} // namespace vis
+}  // namespace vis

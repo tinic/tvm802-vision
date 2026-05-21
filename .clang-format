@@ -1,0 +1,35 @@
+# clang-format config for tvm802-vision.
+#
+# Based on Google style, adapted to this codebase's existing conventions:
+#   - 4-space indent (not Google's 2)
+#   - left-aligned pointers (const void* p)
+#   - namespace contents not indented
+#   - dense short ifs/loops/blocks kept on one line
+#
+# ColumnLimit is 0 on purpose: the detector code uses intentionally wide, dense
+# lines and hand-aligned trailing comments. Disabling column-based reflow keeps
+# that layout intact while still enforcing indent/brace/spacing/pointer rules.
+# Set ColumnLimit to e.g. 100 if you'd rather have wrapping enforced.
+---
+Language:        Cpp
+Standard:        c++20
+BasedOnStyle:    Google
+ColumnLimit:     0
+IndentWidth:     4
+TabWidth:        4
+UseTab:          Never
+AccessModifierOffset: -4
+NamespaceIndentation: None
+PointerAlignment: Left
+DerivePointerAlignment: false
+ReflowComments:  false
+SortIncludes:    false
+SpacesBeforeTrailingComments: 2
+AlignTrailingComments: true
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AllowShortLoopsOnASingleLine: true
+AllowShortBlocksOnASingleLine: Always
+AllowShortCaseLabelsOnASingleLine: true
+KeepEmptyLinesAtTheStartOfBlocks: false
+...

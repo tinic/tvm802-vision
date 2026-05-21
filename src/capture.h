@@ -29,4 +29,4 @@ const char* dir();
 // Append a line to C:\mvision_capture\compare.log.
 void log_line(const char* line);
 
-} // namespace cap
+}  // namespace cap

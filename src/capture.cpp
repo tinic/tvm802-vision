@@ -5,8 +5,8 @@
 #include <cstdio>
 
 namespace {
-constexpr const char* kDir      = "C:\\mvision_capture";
-constexpr const char* kTrigger  = "C:\\mvision_capture\\on";
+constexpr const char* kDir = "C:\\mvision_capture";
+constexpr const char* kTrigger = "C:\\mvision_capture\\on";
 constexpr const char* kFramesTrigger = "C:\\mvision_capture\\frames";
 
 std::atomic<int> g_counter{0};
@@ -15,7 +15,7 @@ bool file_exists(const char* path) {
     DWORD a = GetFileAttributesA(path);
     return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
 }
-} // namespace
+}  // namespace
 
 namespace cap {
 
@@ -26,7 +26,9 @@ bool armed() {
     return file_exists(kTrigger);
 }
 
-bool frames_enabled() { return file_exists(kFramesTrigger); }
+bool frames_enabled() {
+    return file_exists(kFramesTrigger);
+}
 
 int next_index() {
     int idx = g_counter.fetch_add(1, std::memory_order_relaxed);
@@ -34,7 +36,9 @@ int next_index() {
     return idx;
 }
 
-const char* dir() { return kDir; }
+const char* dir() {
+    return kDir;
+}
 
 void log_line(const char* line) {
     if (!line) return;
@@ -47,4 +51,4 @@ void log_line(const char* line) {
     }
 }
 
-} // namespace cap
+}  // namespace cap
