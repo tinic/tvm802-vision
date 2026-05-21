@@ -18,6 +18,7 @@
 #include "vision.h"
 
 #include <cstdio>
+#include <cstring>
 #include <chrono>
 #include <thread>
 
@@ -32,6 +33,35 @@ double g_qfMs = 0.0;     // last QueryFrame duration
 double g_detMs = 0.0;    // last our-detector duration
 double g_origMs = 0.0;   // last original-CheckMark2 duration
 unsigned int g_lastFrameHash = 0;  // freshness guard: hash of the last frame served
+
+// ImageTemplate dual-template cache. The host pushes one of its two mark
+// templates to CheckTemplate at a time (and passes null on most frames). We keep
+// BOTH (dedup by hash) and match the active one — the slot the host last set —
+// across the intervening null frames, until the host sets the other. Each slot
+// carries its own locked match scale. The template plane is a size x size 8-bit
+// gray image, widthStep aligned to 4.
+struct TmplEntry { unsigned char buf[16384]; int len; int sz; unsigned int hash; double scale; };
+TmplEntry g_tmpls[2];
+int g_nTmpls = 0;
+int g_tmplNext = 0;                                            // round-robin replace slot
+int g_activeIdx = -1;                                          // template in use until the host sets the other
+unsigned int tmpl_hash(const unsigned char* p, size_t n) {
+    unsigned int h = 2166136261u;
+    for (size_t i = 0; i < n; i += 7) h = (h ^ p[i]) * 16777619u;
+    return h ? h : 1u;
+}
+int cache_template(const unsigned char* t, int sz) {            // returns slot index, dedup by hash
+    const int step = (sz + 3) & ~3; const size_t n = static_cast<size_t>(step) * sz;
+    if (!t || sz < 4 || n > sizeof g_tmpls[0].buf) return -1;
+    const unsigned int h = tmpl_hash(t, n);
+    for (int i = 0; i < g_nTmpls; ++i) if (g_tmpls[i].hash == h && g_tmpls[i].sz == sz) return i;
+    int idx;
+    if (g_nTmpls < 2) idx = g_nTmpls++;
+    else { idx = g_tmplNext; g_tmplNext = (g_tmplNext + 1) & 1; }  // replace round-robin
+    std::memcpy(g_tmpls[idx].buf, t, n); g_tmpls[idx].len = static_cast<int>(n);
+    g_tmpls[idx].sz = sz; g_tmpls[idx].hash = h; g_tmpls[idx].scale = 0.0;
+    return idx;
+}
 }
 
 // ---- shared result state (matches the original's shared-globals design) -----
@@ -195,9 +225,33 @@ int   __stdcall CheckMark2(void* f, int hwnd, int w, int h, int algo, int r) {
 }
 
 int   __stdcall GetTemplate(void* f, unsigned char* out, int sz, double p)  { return mv::orig::GetTemplate(f, out, sz, p); }
+
+// CheckTemplate (down-vision ImageTemplate mode): field-aware template match.
+// The host supplies one of its two mark templates here (and null on most frames).
+// Cache both, match the active one (the slot last set) every frame, and drive
+// placement via GetOffset — same dispatch as CheckMark2. Falls back to the
+// original render only if our preview render fails.
 int   __stdcall CheckTemplate(void* f, int hwnd, int w, int h, unsigned char* t, int sz, double th, int m) {
-    g_ours = false;
-    return mv::orig::CheckTemplate(f, hwnd, w, h, t, sz, th, m);
+    auto t0 = clk::now();
+    const double refX = 320.0 - g_mvoX;   // imgW/2 - mvoX (640-wide frame)
+    const double refY = 240.0 - g_mvoY;   // imgH/2 - mvoY
+    const int searchR = (g_areaMin > 8 && g_areaMin < 400) ? g_areaMin : 150;
+    if (t && sz >= 4) {
+        const int idx = cache_template(t, sz);       // host set this fiducial's template...
+        if (idx >= 0) g_activeIdx = idx;             // ...use it until the host sets the other
+    }
+    vis::MarkResult mr;
+    if (g_activeIdx >= 0 && g_activeIdx < g_nTmpls)
+        mr = vis::detect_template_mark(f, g_tmpls[g_activeIdx].buf, g_tmpls[g_activeIdx].sz,
+                                       th, m, refX, refY, searchR, &g_tmpls[g_activeIdx].scale);
+    g_detMs = ms_since(t0);
+    set_our_result(mr);                                  // our offset drives placement
+    auto t1 = clk::now();
+    if (!vis::render_preview(f, reinterpret_cast<void*>(static_cast<intptr_t>(hwnd)), g_mvoX, g_mvoY, searchR, mr))
+        mv::orig::CheckTemplate(f, hwnd, w, h, t, sz, th, m);
+    g_origMs = ms_since(t1);
+    maybe_log(f, "CheckTemplate", sz, m, mr);
+    return 0;
 }
 int   __stdcall TemplateVision(void* f, int hwnd, int w, int h, unsigned char* t, int sz, double th, int m) {
     return mv::orig::TemplateVision(f, hwnd, w, h, t, sz, th, m);

@@ -44,6 +44,22 @@ MarkResult detect_circle_mark(const void* frame, int markSizePx,
 // null frame; any valid frame hashes to non-zero.
 unsigned int frame_hash(const void* frame);
 
+// Template match for the down-vision mark (ImageTemplate mode). templateBytes:
+// the host's CheckTemplate buffer; plane0 (size*size, widthStep aligned to 4) is
+// the gray template. Field-aware: deinterlaces and matches the (180-deg flipped)
+// template against each field, restricted to a tight crop around the reference
+// (same center as the Circular path). strength (1-10) sets the acceptance
+// threshold. cx/cy = matched template CENTER in full-frame coords (same
+// convention as detect_circle_mark). NON-DESTRUCTIVE.
+// ioScale (optional): per-template scale cache. On entry, if 0.4..1.4 the matcher
+// tries that scale first (single-scale, fast) and only re-sweeps if it degrades;
+// on a good match it is set to the working scale. Pass a distinct double per
+// cached template (dual cache) so each mark keeps its own locked scale.
+MarkResult detect_template_mark(const void* frame, const unsigned char* templateBytes,
+                                int size, double threshold, int strength,
+                                double refX = -1.0, double refY = -1.0,
+                                int searchRadiusPx = 0, double* ioScale = nullptr);
+
 // Save an IplImage* frame to `path` (PNG) without modifying the buffer — we
 // must NOT use the original mySaveImage, which flips the buffer in place.
 // Returns true on success.
