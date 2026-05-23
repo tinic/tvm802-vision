@@ -17,10 +17,13 @@
 #include "capture.h"
 #include "vision.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <chrono>
 #include <functional>
+#include <limits>
 #include <thread>
 
 // Lightweight timing to locate the frame-rate bottleneck (QueryFrame vs our
@@ -84,10 +87,43 @@ constexpr int kAreaMinPx = 8, kAreaMaxPx = 400, kDefaultSearchPx = 150;
 double g_mvoX = 0.0, g_mvoY = 0.0;  // markVisionOffset (px), from setter
 int g_areaMin = 0, g_areaMax = 0;   // SetMarkVisionAreaMinMax ("Range") — search-area radius
 
-bool g_ours = false;    // is the last result ours (vs original)?
-double g_ourW = 0.0;    // GetOffset W field (offsetX)
-double g_ourH = 0.0;    // GetOffset H field (already negated)
-double g_ourMin = 1.0;  // match quality (0=best)
+// Which detector owns the last result, so GetOffset/GetMin_val pick the right
+// packing: down marks pack the offset into W/H (X=Y=A=0); up-vision components pack
+// X/Y=offset, W/H=size, A=angle. Original = pass straight through to the vendor DLL.
+enum class ResultSrc { Original,
+                       Mark,
+                       Comp };
+ResultSrc g_resultSrc = ResultSrc::Original;
+
+double g_ourW = 0.0;    // mark: GetOffset W field (offsetX)
+double g_ourH = 0.0;    // mark: GetOffset H field (already negated)
+double g_ourMin = 1.0;  // mark: match quality (0=best)
+
+// Up-vision component (CheckComp) result + host priors.
+double g_compX = 0.0, g_compY = 0.0, g_compW = 0.0, g_compH = 0.0, g_compA = 0.0;
+double g_compMin = 1.0;                                        // comp quality (0=best)
+double g_compExpW = 0.0, g_compExpH = 0.0;                     // expected size (host units), SetCompSizeWHA
+double g_compExpA = std::numeric_limits<double>::quiet_NaN();  // expected angle, SetCompAngle/WHA
+int g_compThreshold = 0;                                       // Comp Threshold (SetThreshold); 0 = detector default
+double g_upoX = 0.0, g_upoY = 0.0;                             // up-vision offset (px), SetUpVisionOffsetXY
+
+// Up-vision GetOffset packing (CALIBRATION-PENDING). CheckComp packs X/Y=offset,
+// W/H=detected SIZE, A=angle. The exact transform -- px<->host-units scale, the
+// mirror sign (the up camera flips the frame), and the angle sign -- is calibrated
+// from the shadow log (our detection vs the original's logged X/Y/W/H/A on the same
+// frame). These are the documented best-guess starting points and MUST be confirmed
+// before kCompDrive is set true. See re/UP-VISION-PLAN.md (private).
+constexpr double kUpScale = 1.0 / 1.5;  // px -> host units (down divides by 1.5; up's
+                                        // factor is unverified) -- TODO calibrate
+constexpr bool kUpMirrorX = true;       // up camera horizontal mirror -- TODO confirm
+constexpr bool kUpMirrorY = false;      // up camera vertical mirror   -- TODO confirm
+constexpr double kUpAngleSign = -1.0;   // native negates the box angle -- TODO confirm
+
+// SHADOW by default: our component detector runs read-only alongside the original,
+// which keeps DRIVING placement; both results are logged (when capture is armed) so
+// the transform above can be calibrated on real frames at zero placement risk. Flip
+// to true to let our detector drive (only after the kUp* constants are confirmed).
+constexpr bool kCompDrive = false;
 
 // Compute our result in the native convention from a detection.
 // The original mirrors the frame 180 deg (down-vision camera mirror mode) before
@@ -110,7 +146,7 @@ void set_our_result(const vis::MarkResult& mr) {
         g_ourW = 0.0;
         g_ourH = 0.0;
         g_ourMin = 1.0;
-        g_ours = true;
+        g_resultSrc = ResultSrc::Mark;
         return;
     }
     const double cxC = mr.imgW / 2.0;
@@ -118,7 +154,23 @@ void set_our_result(const vis::MarkResult& mr) {
     g_ourW = (cxC - mr.cx - g_mvoX) / kScale;
     g_ourH = -(cyC - mr.cy - g_mvoY) / kScale;  // GetOffset returns H negated
     g_ourMin = 0.05;                            // low = good match
-    g_ours = true;
+    g_resultSrc = ResultSrc::Mark;
+}
+
+// Pack an up-vision component pose into the comp GetOffset fields (X/Y=offset,
+// W/H=size, A=angle). Calibration-pending (see the kUp* constants); only reached
+// when kCompDrive is true.
+void set_our_comp_result(const vis::CompResult& cr) {
+    const double cxC = cr.imgW / 2.0, cyC = cr.imgH / 2.0;
+    const double dx = kUpMirrorX ? (cxC - cr.cx) : (cr.cx - cxC);
+    const double dy = kUpMirrorY ? (cyC - cr.cy) : (cr.cy - cyC);
+    g_compX = dx * kUpScale;
+    g_compY = dy * kUpScale;
+    g_compW = cr.w * kUpScale;
+    g_compH = cr.h * kUpScale;
+    g_compA = kUpAngleSign * cr.angle;
+    g_compMin = cr.found ? std::max(0.0, 1.0 - cr.quality) : 1.0;  // 0 = best
+    g_resultSrc = ResultSrc::Comp;
 }
 
 // Optional capture/logging (opt-in via trigger file). `shadow`, when non-null, is
@@ -163,6 +215,53 @@ void reference_point(const void* frame, double* refX, double* refY) {
     vis::frame_size(frame, &w, &h);
     *refX = w / 2.0 - g_mvoX;
     *refY = h / 2.0 - g_mvoY;
+}
+
+// Up-vision reference: the part is presented to the up camera on the nozzle, so it
+// sits near the frame center (minus the up-vision offset). Used to seed/constrain
+// the component center search.
+void up_reference_point(const void* frame, double* refX, double* refY) {
+    int w = kDefaultFrameW, h = kDefaultFrameH;
+    vis::frame_size(frame, &w, &h);
+    *refX = w / 2.0 - g_upoX;
+    *refY = h / 2.0 - g_upoY;
+}
+
+// Shadow/Phase-0 logging for CheckComp (opt-in via the capture trigger). Logs OUR
+// component pose and the ORIGINAL's packed result (read back from its GetOffset/
+// GetMin_val) for the SAME frame, plus the host inputs -- the dataset that
+// calibrates the comp packing (kUp* constants) and vets our detector vs the vendor.
+void maybe_log_comp(const void* frame, const vis::CompResult& cr) {
+    if (!cap::armed()) return;
+    int idx = cap::next_index();
+    if (idx < 0) return;
+    if (cap::frames_enabled()) {
+        char png[MAX_PATH];
+        std::snprintf(png, sizeof png, "%s\\comp_%04d.png", cap::dir(), idx);
+        vis::save_frame(frame, png);
+    }
+    // The original's result (it ran in shadow mode, or for its preview side effect).
+    double ox = 0, oy = 0, ow = 0, oh = 0, oa = 0, omin = 1.0;
+    mv::orig::GetOffset(&ox, &oy, &ow, &oh, &oa);
+    mv::orig::GetMin_val(&omin);
+
+    const char* method = cr.method == vis::CompResult::Method::Symmetry      ? "symmetry"
+                         : cr.method == vis::CompResult::Method::MinAreaRect ? "minarearect"
+                                                                             : "none";
+    char line[768];
+    std::snprintf(line, sizeof line,
+                  "%04d,CheckComp,drive=%d,thr=%d,expW=%.3f,expH=%.3f,expA=%.3f,upo=%.1f/%.1f,"
+                  "ours,found=%d,cx=%.2f,cy=%.2f,w=%.2f,h=%.2f,angle=%.2f,q=%.3f,method=%s,"
+                  "orig,x=%.4f,y=%.4f,w=%.4f,h=%.4f,a=%.4f,min=%.3f,"
+                  "ms,queryFrame=%.1f,detect=%.1f,"
+                  "ipl,ok=%d,w=%d,h=%d,origin=%d,fhash=%u",
+                  idx, kCompDrive ? 1 : 0, g_compThreshold, g_compExpW, g_compExpH, g_compExpA,
+                  g_upoX, g_upoY,
+                  cr.found ? 1 : 0, cr.cx, cr.cy, cr.w, cr.h, cr.angle, cr.quality, method,
+                  ox, oy, ow, oh, oa, omin,
+                  g_qfMs, g_detMs,
+                  cr.headerOk ? 1 : 0, cr.imgW, cr.imgH, cr.imgOrigin, cr.frameHash);
+    cap::log_line(line);
 }
 
 // Shared scaffolding for the down-vision mark checks we own (CheckMark2,
@@ -265,22 +364,60 @@ void* __stdcall QueryFrame(void* cam, int timeout) {
     return r;
 }
 
-// Up-vision component / nozzle / down-component: keep original; mark our result
-// invalid so GetOffset passes through to the original for these modes.
+// CheckComp (up-vision component pose). Our rectlinear-symmetry detector runs on
+// every call. By default (kCompDrive=false) it is SHADOW-ONLY: the original drives
+// placement and both results are logged for calibration (zero placement risk). With
+// kCompDrive=true and a confident detection, our pose drives placement via the
+// comp-mode GetOffset packing, and the original is invoked only for its preview.
 int __stdcall CheckComp(void* f, int hwnd, int w, int h) {
-    g_ours = false;
-    return mv::orig::CheckComp(f, hwnd, w, h);
+    // Host expected-size prior -> px (soft; dropped if it converts to something
+    // implausible, which just means the scale guess is off -- harmless, the detector
+    // self-localizes without a prior).
+    int fw = kDefaultFrameW, fh = kDefaultFrameH;
+    vis::frame_size(f, &fw, &fh);
+    const double maxBody = 0.5 * static_cast<double>(fw < fh ? fw : fh);
+    double expWpx = (g_compExpW > 0.0) ? g_compExpW / kUpScale : 0.0;
+    double expHpx = (g_compExpH > 0.0) ? g_compExpH / kUpScale : 0.0;
+    if (expWpx > maxBody || expHpx > maxBody) {
+        expWpx = 0.0;
+        expHpx = 0.0;
+    }
+
+    double refX = 0.0, refY = 0.0;
+    up_reference_point(f, &refX, &refY);
+
+    auto t0 = clk::now();
+    vis::CompResult cr = vis::detect_component(f, expWpx, expHpx, g_compExpA,
+                                               g_compThreshold, refX, refY, 0);
+    g_detMs = ms_since(t0);
+
+    int rc;
+    if (kCompDrive && cr.found) {
+        set_our_comp_result(cr);             // our pose drives via comp-mode GetOffset
+        mv::orig::CheckComp(f, hwnd, w, h);  // original called for its preview only
+        rc = 0;
+    } else {
+        g_resultSrc = ResultSrc::Original;  // original drives (shadow mode / our miss)
+        rc = mv::orig::CheckComp(f, hwnd, w, h);
+    }
+    maybe_log_comp(f, cr);
+    return rc;
 }
+
+// Up-vision nozzle / down-component: keep original; mark our result invalid so
+// GetOffset passes through to the original for these modes. (CheckNozzle is a dead
+// vendor export -- the host never calls it -- but we keep the forwarder so the
+// export table matches the original ABI.)
 int __stdcall CheckNozzle(void* f, int hwnd, int w, int h) {
-    g_ours = false;
+    g_resultSrc = ResultSrc::Original;
     return mv::orig::CheckNozzle(f, hwnd, w, h);
 }
 int __stdcall DownCheckComp(void* f, int hwnd, int w, int h, int p) {
-    g_ours = false;
+    g_resultSrc = ResultSrc::Original;
     return mv::orig::DownCheckComp(f, hwnd, w, h, p);
 }
 void* __stdcall DownShow(void* f) {
-    g_ours = false;
+    g_resultSrc = ResultSrc::Original;
     return mv::orig::DownShow(f);
 }
 
@@ -290,7 +427,7 @@ void* __stdcall DownShow(void* f) {
 // through. r = strength (unused by the Round detector).
 int __stdcall CheckMark(void* f, int hwnd, int w, int h, int algo, int r) {
     if (algo != 0) {
-        g_ours = false;
+        g_resultSrc = ResultSrc::Original;
         return mv::orig::CheckMark(f, hwnd, w, h, algo, r);
     }
     // Circular-symmetry DRIVES placement (shadow-validated on hardware: matched/
@@ -376,31 +513,52 @@ int __stdcall mySaveImage(void* f, const char* p) {
 // Result accessors: return OUR result when the last check was ours, else the
 // original's (so up-vision / component modes are unaffected).
 void __stdcall GetOffset(double* x, double* y, double* w, double* h, double* a) {
-    if (g_ours) {
-        *x = 0.0;
-        *y = 0.0;
-        *w = g_ourW;
-        *h = g_ourH;
-        *a = 0.0;  // our down-vision modes never report an angle
-    } else {
-        mv::orig::GetOffset(x, y, w, h, a);
+    switch (g_resultSrc) {
+        case ResultSrc::Mark:  // down marks: offset in W/H, X=Y=A=0
+            *x = 0.0;
+            *y = 0.0;
+            *w = g_ourW;
+            *h = g_ourH;
+            *a = 0.0;
+            break;
+        case ResultSrc::Comp:  // up-vision: X/Y=offset, W/H=size, A=angle
+            *x = g_compX;
+            *y = g_compY;
+            *w = g_compW;
+            *h = g_compH;
+            *a = g_compA;
+            break;
+        default:
+            mv::orig::GetOffset(x, y, w, h, a);
+            break;
     }
 }
 void __stdcall GetMin_val(double* v) {
-    if (g_ours) {
-        *v = g_ourMin;
-    } else {
-        mv::orig::GetMin_val(v);
+    switch (g_resultSrc) {
+        case ResultSrc::Mark:
+            *v = g_ourMin;
+            break;
+        case ResultSrc::Comp:
+            *v = g_compMin;
+            break;
+        default:
+            mv::orig::GetMin_val(v);
+            break;
     }
 }
 
 void __stdcall SetThreshold(int v) {
+    g_compThreshold = v;  // Comp Threshold (up worker sets it before CheckComp)
     mv::orig::SetThreshold(v);
 }
 void __stdcall SetCompAngle(double v) {
+    g_compExpA = v;  // expected component angle (prior)
     mv::orig::SetCompAngle(v);
 }
 void __stdcall SetCompSizeWHA(double w, double h, double a) {
+    g_compExpW = w;  // expected component size + angle (priors)
+    g_compExpH = h;
+    g_compExpA = a;
     mv::orig::SetCompSizeWHA(w, h, a);
 }
 void __stdcall SetMarkVisionOffsetXY(double x, double y) {
@@ -409,6 +567,8 @@ void __stdcall SetMarkVisionOffsetXY(double x, double y) {
     mv::orig::SetMarkVisionOffsetXY(x, y);
 }
 void __stdcall SetUpVisionOffsetXY(double x, double y) {
+    g_upoX = x;  // up-vision offset (px) -> component search reference
+    g_upoY = y;
     mv::orig::SetUpVisionOffsetXY(x, y);
 }
 void __stdcall SetMarkVisionAreaMinMax(int mn, int mx) {

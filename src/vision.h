@@ -8,6 +8,7 @@
 // (see tests/).
 
 #include <cstdint>
+#include <limits>
 
 namespace vis {
 
@@ -70,6 +71,51 @@ MarkResult detect_round_mark(const void* frame, double refX = -1.0, double refY 
 // detect_circle_mark. Field-aware via detect_with_fields. NON-DESTRUCTIVE.
 MarkResult detect_circular_symmetry(const void* frame, double refX = -1.0, double refY = -1.0,
                                     int searchRadiusPx = 0, int minDiaPx = 0, int maxDiaPx = 0);
+
+// Up-vision component pose (CheckComp). Unlike a fiducial (center only), a placed
+// part needs full pose -- center, body size, and rotation -- which the host packs
+// into GetOffset as X/Y = offset, W/H = size, A = angle (a DIFFERENT packing from
+// the down-mark modes, which put the offset in W/H). The up-vision read is settled
+// (the host dwells before the trigger), so motion/interlace is a minor factor; the
+// hard part is shape + angle, not lock-under-motion.
+struct CompResult {
+    bool found = false;
+    double cx = 0, cy = 0;  // detected center, image px (top-left origin, top-down, UNflipped)
+    double w = 0, h = 0;    // detected body size, image px (w along the reported-angle axis)
+    double angle = 0;       // part rotation, degrees, normalized to (-45, 45]
+    double quality = 0;     // detector confidence (symmetry/fit score; higher = better)
+    int imgW = 0, imgH = 0, imgOrigin = -1;
+    bool headerOk = false;
+    unsigned int frameHash = 0;
+    // Which path produced the result (diagnostic; logged for offline comparison).
+    enum class Method : std::uint8_t { None,
+                                       Symmetry,
+                                       MinAreaRect } method = Method::None;
+};
+
+// Up-vision component detector (CheckComp), reimplemented from the OpenPnP
+// DetectRectlinearSymmetry idea (no third-party code): find the part angle from the
+// rotated cross-section with the sharpest silhouette edges, then the center and body
+// size from the symmetric edge pair on the axis-aligned projections -- threshold-
+// free, so it does not share the vendor minAreaRect detector's per-package/lighting
+// fragility (one bent pin or glare cannot stretch the box). Falls back to a
+// thresholded-silhouette minAreaRect fit when the symmetry confidence is low (e.g.
+// genuinely asymmetric parts). OpenCV-only (no Windows headers) so it unit-tests
+// off-target against captured frames.
+//
+// Priors from the host (used to seed/disambiguate -- pass <=0 / NaN when absent):
+//   expectedWpx, expectedHpx: expected body size in image px (from SetCompSizeWHA),
+//   expectedAngleDeg:         expected rotation in degrees (NaN = no prior).
+// threshold:      the host Comp Threshold (SetThreshold); <=0 -> built-in default.
+// refX/refY:      where the part center is expected, frame px; <0 -> image center.
+// searchRadiusPx: limit the center search to this radius about (refX,refY); <=0 ->
+//                 default. NON-DESTRUCTIVE: only reads the frame buffer.
+CompResult detect_component(const void* frame,
+                            double expectedWpx = 0.0, double expectedHpx = 0.0,
+                            double expectedAngleDeg = std::numeric_limits<double>::quiet_NaN(),
+                            int threshold = 0,
+                            double refX = -1.0, double refY = -1.0,
+                            int searchRadiusPx = 0);
 
 // Cheap sparse FNV-1a hash of an IplImage* frame buffer (samples a grid). Two
 // reads with the same hash are (almost certainly) the same camera frame — used

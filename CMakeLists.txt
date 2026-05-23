@@ -73,6 +73,7 @@ if(_build_dll)
         src/detect_contour.cpp
         src/detect_template.cpp
         src/detect_symmetry.cpp
+        src/detect_component.cpp
         src/preview.cpp
     )
 
@@ -108,7 +109,8 @@ if(BUILD_TESTS)
         src/detect_circle.cpp
         src/detect_contour.cpp
         src/detect_template.cpp
-        src/detect_symmetry.cpp)
+        src/detect_symmetry.cpp
+        src/detect_component.cpp)
     target_include_directories(mvision_detect_test PRIVATE src)
     target_link_libraries(mvision_detect_test PRIVATE ${OpenCV_LIBS} Threads::Threads)
     target_compile_definitions(mvision_detect_test PRIVATE _CRT_SECURE_NO_WARNINGS)

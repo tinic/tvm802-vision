@@ -38,7 +38,8 @@ result $?
 
 gate "clang-tidy (portable detector core: src/detect_*.cpp)"
 clang-tidy -p build-lint src/detect_common.cpp src/detect_circle.cpp \
-    src/detect_contour.cpp src/detect_template.cpp src/detect_symmetry.cpp
+    src/detect_contour.cpp src/detect_template.cpp src/detect_symmetry.cpp \
+    src/detect_component.cpp
 result $?
 
 gate "host build + ctest"

@@ -19,6 +19,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <vector>
 
 namespace {
 
@@ -70,6 +71,51 @@ int synthetic_self_check() {
     return 0;
 }
 
+int synthetic_comp_check() {
+    // 640x480 dark field with a bright rectangular "component" rotated 20 deg, body
+    // 80x40 px, centered off the exact image center. Exercises the full pose: a
+    // stuck-at-center, wrong-size, or wrong-angle bug all fail.
+    cv::Mat img(480, 640, CV_8UC1, cv::Scalar(20));
+    const cv::Point2f center(330.0f, 246.0f);
+    const cv::Size2f body(80.0f, 40.0f);
+    const float angle = 20.0f;
+    cv::Point2f pts[4];
+    cv::RotatedRect(center, body, angle).points(pts);
+    std::vector<cv::Point> poly{cv::Point(cvRound(pts[0].x), cvRound(pts[0].y)),
+                                cv::Point(cvRound(pts[1].x), cvRound(pts[1].y)),
+                                cv::Point(cvRound(pts[2].x), cvRound(pts[2].y)),
+                                cv::Point(cvRound(pts[3].x), cvRound(pts[3].y))};
+    cv::fillConvexPoly(img, poly, cv::Scalar(210), cv::LINE_AA);
+    cv::GaussianBlur(img, img, cv::Size(3, 3), 0);
+
+    IplImage ipl = make_ipl(img);
+    vis::CompResult r = vis::detect_component(&ipl, /*expectedWpx=*/80.0, /*expectedHpx=*/40.0,
+                                              /*expectedAngleDeg=*/20.0, /*threshold=*/50,
+                                              /*refX=*/320.0, /*refY=*/240.0,
+                                              /*searchRadiusPx=*/60);
+    const char* method = r.method == vis::CompResult::Method::Symmetry      ? "symmetry"
+                         : r.method == vis::CompResult::Method::MinAreaRect ? "minarearect"
+                                                                           : "none";
+    std::printf("synthetic-comp: found=%d cx=%.2f cy=%.2f w=%.2f h=%.2f angle=%.2f q=%.3f method=%s\n",
+                r.found ? 1 : 0, r.cx, r.cy, r.w, r.h, r.angle, r.quality, method);
+    if (!r.found) {
+        std::printf("FAIL: detector found no component\n");
+        return 1;
+    }
+    const double ec = std::hypot(r.cx - center.x, r.cy - center.y);
+    // Body could come back as (80,40) or the swapped labeling; accept either ordering.
+    const double longer = std::max(r.w, r.h), shorter = std::min(r.w, r.h);
+    const double ew = std::abs(longer - 80.0), eh = std::abs(shorter - 40.0);
+    double ea = std::abs(r.angle - static_cast<double>(angle));
+    if (ea > 45.0) ea = std::abs(ea - 90.0);  // 90-deg labeling is acceptable
+    int rc = 0;
+    if (ec > 3.0) { std::printf("FAIL: center off by %.2f px (tol 3.0)\n", ec); rc = 1; }
+    if (ew > 6.0 || eh > 6.0) { std::printf("FAIL: size off (%.2f, %.2f) px (tol 6.0)\n", ew, eh); rc = 1; }
+    if (ea > 4.0) { std::printf("FAIL: angle off by %.2f deg (tol 4.0)\n", ea); rc = 1; }
+    if (rc == 0) std::printf("PASS: center %.2fpx, size (%.2f,%.2f), angle %.2fdeg\n", ec, ew, eh, ea);
+    return rc;
+}
+
 int run_over_files(int n, char** paths) {
     std::printf("file,found,cx,cy,radius,quality\n");
     int rc = 0;
@@ -94,5 +140,6 @@ int run_over_files(int n, char** paths) {
 
 int main(int argc, char** argv) {
     if (argc > 1) return run_over_files(argc - 1, argv + 1);
-    return synthetic_self_check();
+    const int rc = synthetic_self_check();
+    return rc | synthetic_comp_check();
 }
