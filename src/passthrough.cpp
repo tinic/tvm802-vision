@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <cstring>
 #include <chrono>
+#include <functional>
 #include <thread>
 
 // Lightweight timing to locate the frame-rate bottleneck (QueryFrame vs our
@@ -120,8 +121,12 @@ void set_our_result(const vis::MarkResult& mr) {
     g_ours = true;
 }
 
-// Optional capture/logging (opt-in via trigger file).
-void maybe_log(const void* frame, const char* func, int algo, int range, const vis::MarkResult& mr) {
+// Optional capture/logging (opt-in via trigger file). `shadow`, when non-null, is
+// a read-only comparison detector's result (e.g. circular-symmetry run alongside
+// the driving detector) — appended to the line for offline comparison; it never
+// drives placement.
+void maybe_log(const void* frame, const char* func, int algo, int range,
+               const vis::MarkResult& mr, const vis::MarkResult* shadow = nullptr) {
     if (!cap::armed()) return;
     int idx = cap::next_index();
     if (idx < 0) return;
@@ -133,16 +138,20 @@ void maybe_log(const void* frame, const char* func, int algo, int range, const v
         vis::save_frame(frame, png);
     }
 
-    char line[640];
-    std::snprintf(line, sizeof line,
-                  "%04d,%s,algo=%d,range=%d,mvo=%.1f/%.1f,area=%d/%d,"
-                  "ours,found=%d,cx=%.2f,cy=%.2f,W=%.4f,H=%.4f,min=%.3f,"
-                  "ms,queryFrame=%.1f,detect=%.1f,render=%.1f,"
-                  "ipl,ok=%d,w=%d,h=%d,origin=%d,fhash=%u",
-                  idx, func, algo, range, g_mvoX, g_mvoY, g_areaMin, g_areaMax,
-                  mr.found ? 1 : 0, mr.cx, mr.cy, g_ourW, g_ourH, g_ourMin,
-                  g_qfMs, g_detMs, g_renderMs,
-                  mr.headerOk ? 1 : 0, mr.imgW, mr.imgH, mr.imgOrigin, mr.frameHash);
+    char line[768];
+    int n = std::snprintf(line, sizeof line,
+                          "%04d,%s,algo=%d,range=%d,mvo=%.1f/%.1f,area=%d/%d,"
+                          "ours,found=%d,cx=%.2f,cy=%.2f,W=%.4f,H=%.4f,min=%.3f,"
+                          "ms,queryFrame=%.1f,detect=%.1f,render=%.1f,"
+                          "ipl,ok=%d,w=%d,h=%d,origin=%d,fhash=%u",
+                          idx, func, algo, range, g_mvoX, g_mvoY, g_areaMin, g_areaMax,
+                          mr.found ? 1 : 0, mr.cx, mr.cy, g_ourW, g_ourH, g_ourMin,
+                          g_qfMs, g_detMs, g_renderMs,
+                          mr.headerOk ? 1 : 0, mr.imgW, mr.imgH, mr.imgOrigin, mr.frameHash);
+    if (shadow && n > 0 && n < static_cast<int>(sizeof line))
+        std::snprintf(line + n, sizeof line - static_cast<size_t>(n),
+                      ",csym,found=%d,cx=%.2f,cy=%.2f,score=%.3f",
+                      shadow->found ? 1 : 0, shadow->cx, shadow->cy, shadow->quality);
     cap::log_line(line);
 }
 
@@ -164,9 +173,14 @@ void reference_point(const void* frame, double* refX, double* refY) {
 // effect. No temporal smoothing — an EMA here lagged the reported center so the
 // host settled on the lagged value and the green cross then drifted off target;
 // the tight radius bracket + both-field detection already give a stable center.
+// `shadow`, when set, is a read-only comparison detector run alongside the driving
+// `detect` (only while capture is armed, to avoid adding latency in production). Its
+// result is logged for offline comparison but NEVER drives placement. Used to vet a
+// candidate detector (circular-symmetry) on live frames before it takes over.
 template <class Detect, class OrigRender>
 int run_mark_check(const void* f, int hwnd, const char* name, int logAlgo, int logRange,
-                   Detect&& detect, OrigRender&& origRender) {
+                   Detect&& detect, OrigRender&& origRender,
+                   const std::function<vis::MarkResult(double, double, int)>& shadow = {}) {
     double refX = 0.0, refY = 0.0;
     reference_point(f, &refX, &refY);
     const int searchR = (g_areaMin > kAreaMinPx && g_areaMin < kAreaMaxPx)
@@ -179,13 +193,19 @@ int run_mark_check(const void* f, int hwnd, const char* name, int logAlgo, int l
 
     set_our_result(mr);  // our offset drives placement
 
+    // Read-only shadow comparison (logged only; never drives). Gated on armed so it
+    // costs nothing in production.
+    vis::MarkResult shadowMr;
+    const bool haveShadow = static_cast<bool>(shadow) && cap::armed();
+    if (haveShadow) shadowMr = shadow(refX, refY, searchR);
+
     auto t1 = clk::now();
     if (!vis::render_preview(f, reinterpret_cast<void*>(static_cast<intptr_t>(hwnd)),
                              g_mvoX, g_mvoY, searchR, mr))
         origRender();  // fall back to the original's render
     g_renderMs = ms_since(t1);
 
-    maybe_log(f, name, logAlgo, logRange, mr);
+    maybe_log(f, name, logAlgo, logRange, mr, haveShadow ? &shadowMr : nullptr);
     return 0;
 }
 }  // namespace
@@ -273,7 +293,15 @@ int __stdcall CheckMark(void* f, int hwnd, int w, int h, int algo, int r) {
         g_ours = false;
         return mv::orig::CheckMark(f, hwnd, w, h, algo, r);
     }
-    return run_mark_check(f, hwnd, "CheckMark", algo, r, [&](double refX, double refY, int searchR) { return vis::detect_round_mark(f, refX, refY, searchR, r); }, [&] { mv::orig::CheckMark(f, hwnd, w, h, algo, r); });
+    // Circular-symmetry DRIVES placement (shadow-validated on hardware: matched/
+    // exceeded the contour detector, sub-pixel agreement, Hough-class settled
+    // stability). On a miss it writes a zero offset ("stay put") -- same fail-safe
+    // as the contour path. (r = strength; the symmetry detector ignores it but it
+    // still tags the log line and feeds the original's preview fallback.)
+    return run_mark_check(
+        f, hwnd, "CheckMark", algo, r,
+        [&](double refX, double refY, int searchR) { return vis::detect_circular_symmetry(f, refX, refY, searchR); },
+        [&] { mv::orig::CheckMark(f, hwnd, w, h, algo, r); });
 }
 
 // CheckMark2: the down-vision fiducial mode (what the machine uses). Detect with

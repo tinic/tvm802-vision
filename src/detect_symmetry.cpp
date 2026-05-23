@@ -26,7 +26,8 @@ struct CsymParams {
     // dia at ~40 px/mm; covers all real fiducials. CheckMark2 passes a tight bracket.
     int minRadiusPx = 8, maxRadiusPx = 34;
     int ringStep = 1;          // radius sampling step
-    double minSymmetry = 2.0;  // accept score (overallVar / area-weighted mean ring var)
+    double minSymmetry = 3.5;  // accept score (overallVar / area-weighted mean ring var);
+                               // live data: real fiducial >=4.6, blown-frame false +ve 2.85
     int coarseStep = 2;        // center grid: coarse pass
     int fineSpan = 3;          // +-span around the coarse winner at 1px
     double subStep = 0.25;     // sub-pixel grid (superSampling = 4)

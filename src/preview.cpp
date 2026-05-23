@@ -101,16 +101,6 @@ bool render_preview(const void* frame, void* hwndV, double mvoX, double mvoY,
             else
                 cv::circle(work, cv::Point(u, v), rad, green, 2);
             cv::drawMarker(work, cv::Point(u, v), green, cv::MARKER_CROSS, 14, 2);
-
-            // Annotate with match-quality (mq) and diameter (px), centered just
-            // above the marker. Black outline first so it stays legible on any bg.
-            const cv::String tag = cv::format("mq%.2f d%d", mr.quality, 2 * rad);
-            const double fs = 0.42;
-            int baseline = 0;
-            const cv::Size ts = cv::getTextSize(tag, cv::FONT_HERSHEY_SIMPLEX, fs, 1, &baseline);
-            const cv::Point tp(u - ts.width / 2, v - rad - 4);
-            cv::putText(work, tag, tp, cv::FONT_HERSHEY_SIMPLEX, fs, cv::Scalar(0, 0, 0), 3, cv::LINE_AA);
-            cv::putText(work, tag, tp, cv::FONT_HERSHEY_SIMPLEX, fs, green, 1, cv::LINE_AA);
         }
 
         if (!work.isContinuous()) work = work.clone();
