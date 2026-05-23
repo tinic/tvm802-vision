@@ -18,9 +18,10 @@ at high head speed.
 
 ## What it does
 
-- Handles **both down-vision mark modes**: **Circular** fiducial detection (Hough)
-  and **ImageTemplate** template-match (for square / cross / text / arbitrary mark
-  shapes). Both are field-aware and share the same sub-pixel offset plumbing.
+- Handles **all three down-vision mark modes**: **Circular** fiducial detection
+  (Hough), **ImageTemplate** template-match (for square / cross / text / arbitrary
+  mark shapes), and **Round** (`CheckMark`) contour-circularity detection. All are
+  field-aware and share the same sub-pixel offset plumbing.
 - Locks the **1 mm copper fiducial pad** with a tight Hough radius bracket, so it
   ignores the larger concentric solder-mask ring that made the stock detection
   "jitter" (the detector was flip-flopping between the two circles).
@@ -43,8 +44,8 @@ at high head speed.
 It's a **passthrough shim**. It exports the same ABI as the original
 `MVision.dll`, forwards every call it doesn't change to the original (which you
 rename to `MVision-orig.dll`), and overrides only the down-vision mark paths
-(`CheckMark2` circular detection and `CheckTemplate` template-match, plus their
-preview). `GetOffset`/`GetMin_val` return our result for those modes; everything
+(`CheckMark2` circular, `CheckTemplate` template-match, and `CheckMark` Round,
+plus their preview). `GetOffset`/`GetMin_val` return our result for those modes; everything
 else (up-vision, nozzle, component checks, etc.) passes straight through to the
 original, unchanged.
 
@@ -55,10 +56,10 @@ time, all through the same passthrough shim:
 
 - [x] **Down-vision fiducial detection** (`CheckMark2`, circular) — done.
 - [x] **Down-vision template-match** (`CheckTemplate`, ImageTemplate mode) — done;
-  field-aware multi-scale SQDIFF for non-circular / arbitrary mark shapes. New in
-  this release.
-- [ ] **Down-vision Round mark** (`CheckMark`) — the one remaining down-vision
-  mode still passing through to the original; small, reuses the circular pipeline.
+  field-aware multi-scale SQDIFF for non-circular / arbitrary mark shapes.
+- [x] **Down-vision Round mark** (`CheckMark`) — done; contour-circularity for
+  round fiducials, with a fixed physical size gate (0.5–3.5 mm). New in this
+  release. **All three down-vision mark modes are now covered.**
 - [ ] **Nozzle detection** (`CheckNozzle`) — planned, likely next. The nozzle
   tip/bore is a circular feature, so it reuses most of the fiducial pipeline
   (Hough circle + sub-pixel center + both-field deinterlace + bilateral denoise),
@@ -123,6 +124,13 @@ With the SurfaceMount application **closed**:
   set it to match your fiducial and the bracket tracks it. The `0.22–0.42`
   fractions only need editing if the fiducial's *shape/proportion* differs a lot
   from this copper-pad-in-mask-ring (e.g. a solid disc).
+- **Round (`CheckMark`)**: this mode has no host mark-size argument, so instead of
+  scaling with a size it accepts any round feature of **0.5–3.5 mm diameter** (a
+  fixed physical radius bracket, `kContour.minRadiusPx`/`maxRadiusPx`), and uses
+  the app's **Range** value as the search radius. It's contour-circularity
+  (Gaussian → Canny → `findContours` → circularity + size + search gate → moment
+  centroid), so it generalizes across fiducials; constants are in
+  `detect_one_field_contour`.
 - **Gates**: circularity, contrast, and search-area constants live near the top
   of `detect_one_field`.
 - **Template-match (ImageTemplate)**: the SQDIFF accept threshold, multi-scale
