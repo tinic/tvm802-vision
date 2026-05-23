@@ -4,6 +4,8 @@
 
 #include <opencv2/core.hpp>
 
+#include <vector>
+
 namespace vis {
 
 // Reusable concentric-ring symmetry scorer (OpenPnP DetectCircularSymmetry,
@@ -18,18 +20,25 @@ namespace vis {
 // two fields. (A rectlinear sibling for up-vision components will live here too.)
 class CircularSymmetry {
 public:
-    CircularSymmetry(double minRadiusPx, double maxRadiusPx, int ringStep)
-        : minR_(minRadiusPx), maxR_(maxRadiusPx), ringStep_(ringStep) {}
+    // Precomputes the ring sample offsets once (the costly cos/sin are done here,
+    // NOT per candidate center) so score() is a trig-free gather.
+    CircularSymmetry(double minRadiusPx, double maxRadiusPx, int ringStep);
 
     // g: single-channel 8U. (cx,cy): candidate center in g's pixels. edgeR (out):
     // radius of the strongest ring (the dominant circular edge). Returns the
     // symmetry score (higher = stronger concentric symmetry; ~1 = none).
-    double score(const cv::Mat& g, double cx, double cy, double& edgeR) const;
+    // step>1 subsamples rings AND points (step*step fewer samples) -- used for the
+    // cheap coarse localization pass; the fine/sub-pixel pass uses step=1 for the
+    // accurate score and center.
+    double score(const cv::Mat& g, double cx, double cy, double& edgeR, int step = 1) const;
 
 private:
-    double minR_;
-    double maxR_;
-    int ringStep_;
+    // Sample-point offsets from the center, grouped by ring. ring i occupies
+    // [ringStart_[i], ringStart_[i+1]); ringR_[i] is its radius.
+    std::vector<float> ox_;
+    std::vector<float> oy_;
+    std::vector<int> ringStart_;
+    std::vector<float> ringR_;
 };
 
 }  // namespace vis

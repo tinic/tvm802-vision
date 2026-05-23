@@ -97,6 +97,14 @@ MarkResult detect_with_fields(
     const void* frame,
     const std::function<MarkResult(const cv::Mat&)>& perField,
     bool wovenWhenSettled) {
+    // Run OpenCV's own ops (resize/blur/extractChannel) single-threaded: at
+    // 640x480 they're tiny, and on the MSVC ConcRT backend the parallel dispatch
+    // costs more than it saves (profiled). Set once on first call.
+    [[maybe_unused]] static const int kOcvSerial = [] {
+        cv::setNumThreads(1);
+        return 0;
+    }();
+
     MarkResult r;
 
     const IplImage* ipl = as_valid_ipl(frame);
@@ -130,21 +138,24 @@ MarkResult detect_with_fields(
         // validated on this hardware -- revisit after the merge (see work item).
         const cv::Mat& img = wrapped;
 
+        // Frames are monochrome (B=G=R), so extractChannel(0) gives the same gray
+        // as a BGR2GRAY weighted sum but cheaper (a plane copy, no arithmetic).
         cv::Mat gray;
         if (img.channels() == 3)
-            cv::cvtColor(img, gray, cv::COLOR_BGR2GRAY);
+            cv::extractChannel(img, gray, 0);
         else
             gray = img;
 
+        // Deinterlace into even/odd fields. The fields are STRIDED VIEWS into gray
+        // (every other row, step*2) -- cv::resize reads them directly, avoiding the
+        // two per-frame field copyTo memcpys (resizing a strided source is identical
+        // to resizing a contiguous copy). Bob to full height with INTER_CUBIC (not
+        // LINEAR): it preserves the copper edge sharpness the ring sampling relies
+        // on; bilinear's ~1px vertical softening blunts it.
         const size_t step = gray.step[0];
-        cv::Mat evenF, oddF, evenU, oddU;
-        cv::Mat(gray.rows / 2, gray.cols, gray.type(), gray.data, step * 2).copyTo(evenF);
-        cv::Mat(gray.rows / 2, gray.cols, gray.type(), gray.data + step, step * 2).copyTo(oddF);
-        // Bob-deinterlace each half-height field back to full height. INTER_CUBIC
-        // (not LINEAR) preserves the copper edge sharpness that HoughCircles'
-        // param2 accumulator and the circularity ring-sample at fr+-3 both rely
-        // on; the ~1px vertical softening from bilinear blunts both. Two small
-        // resizes/frame -> negligible cost.
+        const cv::Mat evenF(gray.rows / 2, gray.cols, gray.type(), gray.data, step * 2);
+        const cv::Mat oddF(gray.rows / 2, gray.cols, gray.type(), gray.data + step, step * 2);
+        cv::Mat evenU, oddU;
         cv::resize(evenF, evenU, cv::Size(gray.cols, gray.rows), 0, 0, cv::INTER_CUBIC);
         cv::resize(oddF, oddU, cv::Size(gray.cols, gray.rows), 0, 0, cv::INTER_CUBIC);
 

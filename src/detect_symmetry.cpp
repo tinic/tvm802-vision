@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 namespace vis {
 namespace {
@@ -28,19 +29,22 @@ struct CsymParams {
     int ringStep = 1;          // radius sampling step
     double minSymmetry = 3.5;  // accept score (overallVar / area-weighted mean ring var);
                                // live data: real fiducial >=4.6, blown-frame false +ve 2.85
-    int coarseStep = 2;        // center grid: coarse pass
-    int fineSpan = 3;          // +-span around the coarse winner at 1px
-    double subStep = 0.25;     // sub-pixel grid (superSampling = 4)
+    int coarseStep = 4;        // center grid: coarse pass (fine pass refines +-fineSpan)
+    int fineSpan = 3;          // +-span around the coarse winner at 1px (>= coarseStep/2)
+    int coarseSampleStep = 2;  // ring/point subsample for the coarse pass (4x cheaper)
 };
 constexpr CsymParams kCsym;
 
-// Bilinear sample; caller guarantees 1 <= x < cols-1 and 1 <= y < rows-1.
-inline double bilin(const cv::Mat& g, double x, double y) {
-    const int x0 = static_cast<int>(std::floor(x));
-    const int y0 = static_cast<int>(std::floor(y));
+// Bilinear sample from a raw row-major buffer. Caller guarantees 1 <= x < cols-1
+// and 1 <= y < rows-1, so x,y are strictly positive -> a plain truncation equals
+// floor (no std::floor: MSVC emits an x87 fld/fstp dance around it). The row
+// pointer is derived from data+step here, NOT via cv::Mat::ptr() per call.
+inline double bilin(const uchar* data, ptrdiff_t step, double x, double y) {
+    const int x0 = static_cast<int>(x);
+    const int y0 = static_cast<int>(y);
     const double fx = x - x0, fy = y - y0;
-    const uchar* row0 = g.ptr<uchar>(y0);
-    const uchar* row1 = g.ptr<uchar>(y0 + 1);
+    const uchar* row0 = data + static_cast<ptrdiff_t>(y0) * step;
+    const uchar* row1 = row0 + step;
     const double a = row0[x0] * (1.0 - fx) + row0[x0 + 1] * fx;
     const double b = row1[x0] * (1.0 - fx) + row1[x0 + 1] * fx;
     return a * (1.0 - fy) + b * fy;
@@ -78,62 +82,119 @@ MarkResult detect_one_field_csym(const cv::Mat& gFull, const CircularSymmetry& s
     struct Cand {
         double x = 0.0, y = 0.0, s = -1.0, e = 0.0;
     };
-    // Max-score center over a grid, gated to the Range circle around the reference.
-    auto scan = [&](double x0, double y0, double rad, double step) {
-        Cand best;
-        best.x = x0;
-        best.y = y0;
-        const int steps = static_cast<int>(std::lround(2.0 * rad / step));
-        for (int iy = 0; iy <= steps; ++iy) {
-            const double y = y0 - rad + static_cast<double>(iy) * step;
-            for (int ix = 0; ix <= steps; ++ix) {
-                const double x = x0 - rad + static_cast<double>(ix) * step;
-                const double dx = x - cxRef, dy = y - cyRef;
-                if (dx * dx + dy * dy > sr2) continue;
-                double e = 0.0;
-                const double s = sym.score(g, x, y, e);
-                if (s > best.s) {
-                    best.s = s;
-                    best.x = x;
-                    best.y = y;
-                    best.e = e;
-                }
+
+    // --- Coarse localization: grid over the Range disc, with subsampled
+    //     rings/points (full density only in the fine refine below). SERIAL on
+    //     purpose: profiling showed parallelizing this sub-millisecond per-field
+    //     search across the MSVC OpenCV ConcRT pool cost far more in scheduler
+    //     overhead (VirtualProcessor / SchedulingNode / KiSwapThread /
+    //     KeYieldExecution) than the work itself -- net-negative here. ---
+    const double gstep = static_cast<double>(kCsym.coarseStep);
+    const int nrows = static_cast<int>(std::lround(2.0 * static_cast<double>(sr) / gstep));
+    const int sstep = kCsym.coarseSampleStep;
+    Cand c0;
+    for (int iy = 0; iy <= nrows; ++iy) {
+        const double y = cyRef - sr + static_cast<double>(iy) * gstep;
+        for (int ix = 0; ix <= nrows; ++ix) {
+            const double x = cxRef - sr + static_cast<double>(ix) * gstep;
+            const double dx = x - cxRef, dy = y - cyRef;
+            if (dx * dx + dy * dy > sr2) continue;
+            double e = 0.0;
+            const double s = sym.score(g, x, y, e, sstep);
+            if (s > c0.s) {
+                c0.s = s;
+                c0.x = x;
+                c0.y = y;
+                c0.e = e;
             }
         }
-        return best;
-    };
+    }
 
-    const Cand c0 = scan(cxRef, cyRef, static_cast<double>(sr), static_cast<double>(kCsym.coarseStep));
-    const Cand c1 = scan(c0.x, c0.y, static_cast<double>(kCsym.fineSpan), 1.0);
-    const Cand c2 = scan(c1.x, c1.y, 1.0, kCsym.subStep);
-    if (c2.s < minSym) return r;
+    // --- Fine refine: small full-density grid around the coarse winner (serial;
+    //     includes the coarse point itself, so c1 ends up full-density-scored). ---
+    Cand c1;
+    const int span = kCsym.fineSpan;
+    for (int iy = -span; iy <= span; ++iy) {
+        const double y = c0.y + iy;
+        for (int ix = -span; ix <= span; ++ix) {
+            const double x = c0.x + ix;
+            const double dx = x - cxRef, dy = y - cyRef;
+            if (dx * dx + dy * dy > sr2) continue;
+            double e = 0.0;
+            const double s = sym.score(g, x, y, e, 1);
+            if (s > c1.s) {
+                c1.s = s;
+                c1.x = x;
+                c1.y = y;
+                c1.e = e;
+            }
+        }
+    }
+    if (c1.s < minSym) return r;
+
+    // Sub-pixel: parabolic fit on the score surface around the 1px winner (4 extra
+    // full-density evals, not an N x N sub-grid scan).
+    double et = 0.0;
+    const double sL = sym.score(g, c1.x - 1.0, c1.y, et, 1);
+    const double sR = sym.score(g, c1.x + 1.0, c1.y, et, 1);
+    const double sU = sym.score(g, c1.x, c1.y - 1.0, et, 1);
+    const double sD = sym.score(g, c1.x, c1.y + 1.0, et, 1);
+    double dx = 0.0, dy = 0.0;
+    const double denx = sL - 2.0 * c1.s + sR;
+    const double deny = sU - 2.0 * c1.s + sD;
+    if (denx < 0.0) dx = 0.5 * (sL - sR) / denx;
+    if (deny < 0.0) dy = 0.5 * (sU - sD) / deny;
+    if (std::abs(dx) > 1.0) dx = 0.0;
+    if (std::abs(dy) > 1.0) dy = 0.0;
 
     r.found = true;
-    r.cx = c2.x + crop.x;
-    r.cy = c2.y + crop.y;
-    r.radius = c2.e;
-    r.quality = c2.s;  // symmetry score (higher = better)
+    r.cx = c1.x + dx + crop.x;
+    r.cy = c1.y + dy + crop.y;
+    r.radius = c1.e;
+    r.quality = c1.s;  // symmetry score (higher = better)
     return r;
 }
 
 }  // namespace
 
-double CircularSymmetry::score(const cv::Mat& g, double cx, double cy, double& edgeR) const {
+CircularSymmetry::CircularSymmetry(double minRadiusPx, double maxRadiusPx, int ringStep) {
+    const int nRings = static_cast<int>((maxRadiusPx - minRadiusPx) / ringStep) + 1;
+    ringStart_.reserve(static_cast<size_t>(nRings) + 1);
+    ringR_.reserve(static_cast<size_t>(nRings));
+    for (int ri = 0; ri < nRings; ++ri) {
+        const double rr = minRadiusPx + static_cast<double>(ri) * ringStep;
+        const int m = std::max(8, static_cast<int>(std::lround(2.0 * CV_PI * rr)));
+        ringStart_.push_back(static_cast<int>(ox_.size()));
+        ringR_.push_back(static_cast<float>(rr));
+        for (int k = 0; k < m; ++k) {
+            const double a = 2.0 * CV_PI * static_cast<double>(k) / m;
+            ox_.push_back(static_cast<float>(rr * std::cos(a)));
+            oy_.push_back(static_cast<float>(rr * std::sin(a)));
+        }
+    }
+    ringStart_.push_back(static_cast<int>(ox_.size()));
+}
+
+// Trig-free: walks the precomputed ring offsets (built once in the constructor).
+// step>1 subsamples rings and points (coarse pass); step=1 is full (fine pass).
+double CircularSymmetry::score(const cv::Mat& g, double cx, double cy, double& edgeR, int step) const {
     double sumAll = 0.0, sumAll2 = 0.0;
     int nAll = 0;
     double wRingVar = 0.0, wSum = 0.0, maxRingVar = -1.0;
     edgeR = 0.0;
-    const int nRings = static_cast<int>((maxR_ - minR_) / ringStep_) + 1;
-    for (int ri = 0; ri < nRings; ++ri) {
-        const double rr = minR_ + static_cast<double>(ri) * ringStep_;
-        const int m = std::max(8, static_cast<int>(std::lround(2.0 * CV_PI * rr)));
+    const double wlim = g.cols - 1.0, hlim = g.rows - 1.0;
+    const uchar* data = g.ptr<uchar>(0);  // row pointer/stride computed ONCE here,
+    const ptrdiff_t gstep = g.step[0];    // not via cv::Mat::ptr() per sample point
+    const int nRings = static_cast<int>(ringR_.size());
+    for (int ri = 0; ri < nRings; ri += step) {
+        const int a = ringStart_[static_cast<size_t>(ri)];
+        const int b = ringStart_[static_cast<size_t>(ri) + 1];
         double s = 0.0, s2 = 0.0;
         int cnt = 0;
-        for (int k = 0; k < m; ++k) {
-            const double a = 2.0 * CV_PI * k / m;
-            const double x = cx + rr * std::cos(a), y = cy + rr * std::sin(a);
-            if (x < 1.0 || y < 1.0 || x >= g.cols - 1 || y >= g.rows - 1) continue;
-            const double v = bilin(g, x, y);
+        for (int i = a; i < b; i += step) {
+            const double x = cx + ox_[static_cast<size_t>(i)], y = cy + oy_[static_cast<size_t>(i)];
+            if (x < 1.0 || y < 1.0 || x >= wlim || y >= hlim) continue;
+            const double v = bilin(data, gstep, x, y);
             s += v;
             s2 += v * v;
             ++cnt;
@@ -149,7 +210,7 @@ double CircularSymmetry::score(const cv::Mat& g, double cx, double cy, double& e
         wSum += cnt;
         if (var > maxRingVar) {
             maxRingVar = var;
-            edgeR = rr;
+            edgeR = ringR_[static_cast<size_t>(ri)];
         }
     }
     if (nAll < 16 || wSum < 1.0) return 0.0;

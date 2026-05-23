@@ -25,6 +25,20 @@ endif()
 # OpenCV from vcpkg (toolchain file passed on the cmake command line).
 find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs)
 
+# Threads: the circular-symmetry detector parallelizes its coarse search across
+# cores (std::thread). On Windows this is a no-op; on POSIX it links pthread.
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
+
+# SIMD: the detector's inner sampling is hot, so enable AVX2 + FMA. AVX2 is
+# baseline on any x86 CPU made in the last decade (Haswell/Zen+). MSVC uses
+# /arch:AVX2 (set per-target below); GCC/Clang/mingw use -mavx2 -mfma.
+if(MSVC)
+    set(MVISION_SIMD)  # MSVC AVX2 is applied via /arch:AVX2 in the per-target block
+else()
+    set(MVISION_SIMD -mavx2 -mfma)
+endif()
+
 # Strict diagnostics, per cpp-best-practices "Use the Tools Available". Applied to
 # OUR translation units only: third-party headers (OpenCV, Windows, the STL) are
 # pulled in via angle brackets and set to /external:W0, so /WX never trips on
@@ -70,10 +84,10 @@ if(_build_dll)
 
     target_include_directories(MVision PRIVATE src)
     # gdi32: preview.cpp uses GDI (StretchDIBits, GetStockObject, ...).
-    target_link_libraries(MVision PRIVATE ${OpenCV_LIBS} kernel32 user32 gdi32)
+    target_link_libraries(MVision PRIVATE ${OpenCV_LIBS} Threads::Threads kernel32 user32 gdi32)
 
     target_compile_definitions(MVision PRIVATE _CRT_SECURE_NO_WARNINGS)
-    target_compile_options(MVision PRIVATE ${MVISION_WARNINGS})
+    target_compile_options(MVision PRIVATE ${MVISION_WARNINGS} ${MVISION_SIMD})
     if(MSVC)
         # /O2 optimize; /fp:contract allow FMA; /arch:AVX2 vectorize our own inner
         # loops (circularity ring, contrast window, centroid reduce) -- OpenCV is
@@ -96,9 +110,9 @@ if(BUILD_TESTS)
         src/detect_template.cpp
         src/detect_symmetry.cpp)
     target_include_directories(mvision_detect_test PRIVATE src)
-    target_link_libraries(mvision_detect_test PRIVATE ${OpenCV_LIBS})
+    target_link_libraries(mvision_detect_test PRIVATE ${OpenCV_LIBS} Threads::Threads)
     target_compile_definitions(mvision_detect_test PRIVATE _CRT_SECURE_NO_WARNINGS)
-    target_compile_options(mvision_detect_test PRIVATE ${MVISION_WARNINGS})
+    target_compile_options(mvision_detect_test PRIVATE ${MVISION_WARNINGS} ${MVISION_SIMD})
     if(MSVC)
         target_compile_options(mvision_detect_test PRIVATE /Zc:__cplusplus /EHsc)
     endif()
