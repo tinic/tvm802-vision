@@ -60,6 +60,17 @@ MarkResult detect_circle_mark(const void* frame, int markSizePx,
 MarkResult detect_round_mark(const void* frame, double refX = -1.0, double refY = -1.0,
                              int searchRadiusPx = 0, int strength = 5);
 
+// Circular-symmetry detector (OpenPnP DetectCircularSymmetry, reimplemented from
+// the published algorithm -- no third-party code). Finds the fiducial center by
+// maximizing concentric-ring symmetry: the variance over all ring samples divided
+// by the area-weighted mean per-ring variance peaks where every ring is uniform
+// (a true concentric center). Threshold- and edge-free, so robust to soft/low-
+// contrast/specular rings where Hough/contour break up. Diameter bracket
+// [minDiaPx,maxDiaPx] (<=0 -> physical default); refX/refY/searchRadiusPx as
+// detect_circle_mark. Field-aware via detect_with_fields. NON-DESTRUCTIVE.
+MarkResult detect_circular_symmetry(const void* frame, double refX = -1.0, double refY = -1.0,
+                                    int searchRadiusPx = 0, int minDiaPx = 0, int maxDiaPx = 0);
+
 // Cheap sparse FNV-1a hash of an IplImage* frame buffer (samples a grid). Two
 // reads with the same hash are (almost certainly) the same camera frame — used
 // to detect stale/duplicate frames from QueryFrame. Returns 0 for an invalid or

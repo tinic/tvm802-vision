@@ -48,7 +48,7 @@ jobs:
         run: cmake -S . -B build-lint -DBUILD_TESTS=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
       - name: clang-tidy (portable detector core)
-        run: clang-tidy -p build-lint src/vision.cpp
+        run: clang-tidy -p build-lint src/detect_common.cpp src/detect_circle.cpp src/detect_contour.cpp src/detect_template.cpp src/detect_symmetry.cpp
 
       - name: Build + test (host arch)
         run: |

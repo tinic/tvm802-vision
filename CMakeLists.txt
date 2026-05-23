@@ -54,7 +54,11 @@ if(_build_dll)
         src/dllmain.cpp
         src/passthrough.cpp
         src/capture.cpp
-        src/vision.cpp
+        src/detect_common.cpp
+        src/detect_circle.cpp
+        src/detect_contour.cpp
+        src/detect_template.cpp
+        src/detect_symmetry.cpp
         src/preview.cpp
     )
 
@@ -85,7 +89,12 @@ endif()
 
 if(BUILD_TESTS)
     # Links only the platform-neutral detector (no preview.cpp / no Windows libs).
-    add_executable(mvision_detect_test tests/test_detect.cpp src/vision.cpp)
+    add_executable(mvision_detect_test tests/test_detect.cpp
+        src/detect_common.cpp
+        src/detect_circle.cpp
+        src/detect_contour.cpp
+        src/detect_template.cpp
+        src/detect_symmetry.cpp)
     target_include_directories(mvision_detect_test PRIVATE src)
     target_link_libraries(mvision_detect_test PRIVATE ${OpenCV_LIBS})
     target_compile_definitions(mvision_detect_test PRIVATE _CRT_SECURE_NO_WARNINGS)

@@ -36,8 +36,9 @@ gate "configure (host tests + compile DB for clang-tidy)"
 cmake -S . -B build-lint -DBUILD_TESTS=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON >/dev/null
 result $?
 
-gate "clang-tidy (portable detector core: src/vision.cpp)"
-clang-tidy -p build-lint src/vision.cpp
+gate "clang-tidy (portable detector core: src/detect_*.cpp)"
+clang-tidy -p build-lint src/detect_common.cpp src/detect_circle.cpp \
+    src/detect_contour.cpp src/detect_template.cpp src/detect_symmetry.cpp
 result $?
 
 gate "host build + ctest"
