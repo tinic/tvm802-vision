@@ -165,7 +165,7 @@ void reference_point(const void* frame, double* refX, double* refY) {
 // host settled on the lagged value and the green cross then drifted off target;
 // the tight radius bracket + both-field detection already give a stable center.
 template <class Detect, class OrigRender>
-int run_mark_check(void* f, int hwnd, const char* name, int logAlgo, int logRange,
+int run_mark_check(const void* f, int hwnd, const char* name, int logAlgo, int logRange,
                    Detect&& detect, OrigRender&& origRender) {
     double refX = 0.0, refY = 0.0;
     reference_point(f, &refX, &refY);
