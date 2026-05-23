@@ -20,8 +20,10 @@ at high head speed.
 
 - Handles **all three down-vision mark modes**: **Circular** fiducial detection
   (Hough), **ImageTemplate** template-match (for square / cross / text / arbitrary
-  mark shapes), and **Round** (`CheckMark`) contour-circularity detection. All are
-  field-aware and share the same sub-pixel offset plumbing.
+  mark shapes), and **Round** (`CheckMark`) **circular-symmetry** detection
+  (threshold- and edge-free — it finds the center that maximizes concentric-ring
+  symmetry, robust to soft/low-contrast/specular rings). All are field-aware and
+  share the same sub-pixel offset plumbing.
 - Locks the **1 mm copper fiducial pad** with a tight Hough radius bracket, so it
   ignores the larger concentric solder-mask ring that made the stock detection
   "jitter" (the detector was flip-flopping between the two circles).
@@ -45,9 +47,9 @@ It's a **passthrough shim**. It exports the same ABI as the original
 `MVision.dll`, forwards every call it doesn't change to the original (which you
 rename to `MVision-orig.dll`), and overrides only the down-vision mark paths
 (`CheckMark2` circular, `CheckTemplate` template-match, and `CheckMark` Round,
-plus their preview). `GetOffset`/`GetMin_val` return our result for those modes; everything
-else (up-vision, nozzle, component checks, etc.) passes straight through to the
-original, unchanged.
+plus their preview). `GetOffset`/`GetMin_val` return our result for those modes;
+everything else (up-vision component checks, calibration, etc.) passes straight
+through to the original, unchanged.
 
 ## Status & roadmap
 
@@ -57,21 +59,18 @@ time, all through the same passthrough shim:
 - [x] **Down-vision fiducial detection** (`CheckMark2`, circular) — done.
 - [x] **Down-vision template-match** (`CheckTemplate`, ImageTemplate mode) — done;
   field-aware multi-scale SQDIFF for non-circular / arbitrary mark shapes.
-- [x] **Down-vision Round mark** (`CheckMark`) — done; contour-circularity for
-  round fiducials, with a fixed physical size gate (0.5–3.5 mm). New in this
-  release. **All three down-vision mark modes are now covered.**
-- [ ] **Nozzle detection** (`CheckNozzle`) — planned, likely next. The nozzle
-  tip/bore is a circular feature, so it reuses most of the fiducial pipeline
-  (Hough circle + sub-pixel center + both-field deinterlace + bilateral denoise),
-  just with the nozzle radius and metal-vs-copper contrast.
-- [ ] **Component detection** (`CheckComp`) — planned. Components are varied
-  shapes and placement needs an accurate rotation angle, so this is the larger
-  effort (contour / minimum-area-rectangle based, returning center + θ).
+- [x] **Down-vision Round mark** (`CheckMark`) — done; **circular-symmetry**
+  detection (threshold- and edge-free, sub-pixel) within a fixed physical size
+  bracket (0.5–3.5 mm). **All three down-vision mark modes are now covered — the
+  down-vision camera path is complete.**
+- [ ] **Up-vision component detection** (`CheckComp`) — possible future work, not
+  currently planned. Components are varied shapes and placement needs an accurate
+  rotation angle, so this is a larger effort (minimum-area-rectangle /
+  rectilinear-symmetry based, returning center + θ).
 
-Each path reuses the shim, the `GetOffset` plumbing, the up-camera `MatrixUp`
-perspective calibration, and the capture-for-offline-tuning workflow — so each
-one is less work than the last. Contributions and test reports (especially on the
-802A) are welcome.
+Down-vision paths share the shim, the `GetOffset` plumbing, and the
+capture-for-offline-tuning workflow. Contributions and test reports (especially on
+the 802A) are welcome.
 
 ## Requirements
 
@@ -116,26 +115,32 @@ With the SurfaceMount application **closed**:
 3. Drop in the freshly built `MVision.dll`.
 4. Launch the app — down-vision fiducial detection now uses this pipeline.
 
-## Tuning (`src/vision.cpp`)
+## Tuning
+
+The detectors are split one-per-file under `src/` (`detect_circle.cpp`,
+`detect_template.cpp`, `detect_symmetry.cpp`), with the shared field/frame plumbing
+in `detect_common.cpp`:
 
 - **Mark size** is set in the app's UI, *not* in code: the detection radius
   bracket is computed as `0.22–0.42 × size` where `size` is the host's mark
   "size" argument. So a different fiducial *size* is handled by the UI setting —
   set it to match your fiducial and the bracket tracks it. The `0.22–0.42`
   fractions only need editing if the fiducial's *shape/proportion* differs a lot
-  from this copper-pad-in-mask-ring (e.g. a solid disc).
+  from this copper-pad-in-mask-ring (e.g. a solid disc). Constants live near the
+  top of `detect_circle.cpp` (circularity, contrast, search-area gates).
 - **Round (`CheckMark`)**: this mode has no host mark-size argument, so instead of
   scaling with a size it accepts any round feature of **0.5–3.5 mm diameter** (a
-  fixed physical radius bracket, `kContour.minRadiusPx`/`maxRadiusPx`), and uses
-  the app's **Range** value as the search radius. It's contour-circularity
-  (Gaussian → Canny → `findContours` → circularity + size + search gate → moment
-  centroid), so it generalizes across fiducials; constants are in
-  `detect_one_field_contour`.
-- **Gates**: circularity, contrast, and search-area constants live near the top
-  of `detect_one_field`.
+  fixed physical radius bracket, `kCsym.minRadiusPx`/`maxRadiusPx`), and uses the
+  app's **Range** value as the search radius. It's **circular-symmetry** detection:
+  at each candidate center it scores the variance ratio across concentric rings
+  (uniform rings about a true center → high score), which is threshold- and
+  edge-free, so it stays locked where Hough or contour fits break up on
+  soft/low-contrast/specular rings. Coarse → fine → parabolic sub-pixel; the
+  `CircularSymmetry` scorer and `kCsym` constants are in `detect_symmetry.cpp`.
 - **Template-match (ImageTemplate)**: the SQDIFF accept threshold, multi-scale
   sweep, and parabolic sub-pixel refine are in `detect_template_one_field`;
-  `detect_template_mark` preps the template and runs it field-aware.
+  `detect_template_mark` preps the template and runs it field-aware
+  (`detect_template.cpp`).
 - **Deinterlace / averaging**: field split, settled-averaging threshold, and the
   moving-frame field choice live in `detect_with_fields` (shared by both modes).
 
