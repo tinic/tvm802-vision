@@ -80,10 +80,6 @@ constexpr int kDefaultFrameW = 640, kDefaultFrameH = 480;
 // fall back to a sane default.
 constexpr int kAreaMinPx = 8, kAreaMaxPx = 400, kDefaultSearchPx = 150;
 
-// The original DLL's "mark not found" sentinel offsets (recovered from its
-// output). On a detection miss we replicate them so the host reacts as before.
-constexpr double kNotFoundW = -159.333, kNotFoundH = 132.667;
-
 double g_mvoX = 0.0, g_mvoY = 0.0;  // markVisionOffset (px), from setter
 int g_areaMin = 0, g_areaMax = 0;   // SetMarkVisionAreaMinMax ("Range") — search-area radius
 
@@ -100,12 +96,18 @@ double g_ourMin = 1.0;  // match quality (0=best)
 //   W =  (imgW/2 - cx - mvoX) / 1.5
 //   H = -(imgH/2 - cy - mvoY) / 1.5
 void set_our_result(const vis::MarkResult& mr) {
-    // Always own the result for CheckMark2 (we no longer call the original, so
-    // the original's offset globals are stale). On detection failure, replicate
-    // the original's "not found" sentinel so the host reacts exactly as before.
+    // Always own the result for the down-vision mark modes (we no longer call the
+    // original, so its offset globals are stale). On a detection MISS, return a
+    // ZERO offset ("no correction") -- NOT a sentinel. The host applies GetOffset
+    // to the head setpoint every frame, unconditionally (it checks neither a
+    // found-flag nor GetMin_val), so any non-zero "not found" value is applied as a
+    // real move and the head WANDERS on transient dropouts; zero = "stay put" holds
+    // through a brief miss. (The original writes a huge 999999 sentinel here and the
+    // host doesn't guard that either -- it just rarely drops out, locking the larger
+    // solder-mask disc instead of the 1mm copper.)
     if (!mr.found || !mr.headerOk) {
-        g_ourW = kNotFoundW;
-        g_ourH = kNotFoundH;
+        g_ourW = 0.0;
+        g_ourH = 0.0;
         g_ourMin = 1.0;
         g_ours = true;
         return;
@@ -262,11 +264,16 @@ void* __stdcall DownShow(void* f) {
     return mv::orig::DownShow(f);
 }
 
-// CheckMark: algo == -1 is preview-only in the original (no detection), so just
-// pass through. (Algorithmic mark modes could be handled later.)
+// CheckMark: algo==0 is the down-vision "Round" mark mode -> our circle detector
+// sized by the operator's Range (drives placement via GetOffset, same dispatch as
+// CheckMark2). Other algo values (-1 preview-only, legacy shape modes) pass
+// through. r = strength (unused by the Round detector).
 int __stdcall CheckMark(void* f, int hwnd, int w, int h, int algo, int r) {
-    g_ours = false;
-    return mv::orig::CheckMark(f, hwnd, w, h, algo, r);
+    if (algo != 0) {
+        g_ours = false;
+        return mv::orig::CheckMark(f, hwnd, w, h, algo, r);
+    }
+    return run_mark_check(f, hwnd, "CheckMark", algo, r, [&](double refX, double refY, int searchR) { return vis::detect_round_mark(f, refX, refY, searchR, r); }, [&] { mv::orig::CheckMark(f, hwnd, w, h, algo, r); });
 }
 
 // CheckMark2: the down-vision fiducial mode (what the machine uses). Detect with

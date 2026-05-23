@@ -7,7 +7,15 @@
 // preview.cpp — so it can be unit-tested against captured PNG frames off-target
 // (see tests/).
 
+#include <cstdint>
+
 namespace vis {
+
+// Which overlay the preview draws for a detection: a circle (Circular and Round)
+// or a square (ImageTemplate — the matched region). Kept here (no OpenCV types) so
+// the detector header stays Windows/OpenCV-free.
+enum class MarkShape : std::uint8_t { Circle,
+                                      Square };
 
 struct MarkResult {
     bool found = false;
@@ -23,6 +31,9 @@ struct MarkResult {
     bool headerOk = false;
     // Sparse checksum of the raw frame buffer (stale-frame diagnostic in the log).
     unsigned int frameHash = 0;
+    // Interlace comb fraction (motion metric: high => fields misaligned => moving).
+    double combFrac = 0;
+    MarkShape shape = MarkShape::Circle;  // preview overlay style (set per detector)
 };
 
 // frame: an OpenCV 2.4 IplImage* (the native QueryFrame return). We parse the
@@ -40,6 +51,14 @@ struct MarkResult {
 MarkResult detect_circle_mark(const void* frame, int markSizePx,
                               double refX = -1.0, double refY = -1.0,
                               int searchRadiusPx = 0);
+
+// Round (down-vision CheckMark algo==0): contour-circularity detector (NOT Hough --
+// HoughCircles is forbidden in CheckMark mode; it stays in the Circular path only).
+// Feature size is gated by a fixed physical bracket (0.5..3.5mm diameter); the
+// operator's Range (searchRadiusPx) is used AS-IS for the search-area gate.
+// strength (1-10) scales the Canny thresholds. NON-DESTRUCTIVE.
+MarkResult detect_round_mark(const void* frame, double refX = -1.0, double refY = -1.0,
+                             int searchRadiusPx = 0, int strength = 5);
 
 // Cheap sparse FNV-1a hash of an IplImage* frame buffer (samples a grid). Two
 // reads with the same hash are (almost certainly) the same camera frame — used

@@ -1,0 +1,21 @@
+# clang-tidy config for tvm802-vision.
+#
+# Enforced in CI (the `lint` job) and by tools/check.sh on the PORTABLE detector
+# core (src/vision.cpp). The Windows-GDI translation units
+# (preview/passthrough/capture/dllmain) include <windows.h>, which clang-tidy
+# can't parse on the Linux runner, so those are covered by the MSVC /W4 /WX
+# build instead (the `build` job / build-cmake.bat).
+#
+# The check set is kept tight and stable (static analyzer + bugprone +
+# performance) so it doesn't drift across clang-tidy versions; two noisy /
+# low-value checks are excluded.
+Checks: >
+  -*,
+  clang-analyzer-*,
+  bugprone-*,
+  performance-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-narrowing-conversions
+WarningsAsErrors: '*'
+HeaderFilterRegex: 'src/(vision|overlay|iplframe)\.h$'
+FormatStyle: file

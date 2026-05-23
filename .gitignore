@@ -1,7 +1,10 @@
 # build outputs
-build/
+build*/
 bin/
 obj/
+
+# winbuilder-local NMake build recipe (private-machine paths; not for the public repo)
+build-winbuilder.bat
 
 # binaries (never commit vendor or built artifacts)
 *.dll
@@ -14,3 +17,4 @@ obj/
 # IDE / misc
 .vs/
 *.user
+tune_round.cpp

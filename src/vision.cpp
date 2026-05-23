@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <iterator>
 #include <vector>
 
 namespace vis {
@@ -71,9 +72,37 @@ struct TemplateParams {
 };
 constexpr TemplateParams kTmpl;
 
+// Round (CheckMark algo==0) contour-circularity params (the native Round algo --
+// HoughCircles is forbidden in this mode).
+struct ContourParams {
+    double meanLo = 6.0, meanHi = 250.0;  // dropped (black) / blown (white)
+    int searchFallbackPx = 150;           // search radius when the host Range is unset
+    int roiPad = 50;                      // ROI = Range + pad around the reference
+    int roiMinDimPx = 40;                 // skip the ROI crop if it would be smaller
+    int gaussKernel = 13;                 // heavy blur -> cleaner, more complete rings
+    // Fixed physical feature-size gate: 0.5mm..3.5mm diameter (covers all real
+    // fiducials), as a RADIUS bracket at ~40 px/mm (1mm copper ~ d40px here).
+    // Independent of Range; Range stays the search radius. min=0.5/2*40, max=3.5/2*40.
+    int minRadiusPx = 10, maxRadiusPx = 70;
+    // Canny: low = cannyStep*strength + cannyBase, high = low + cannyHighDelta.
+    int cannyBase = 5, cannyStep = 15, cannyHighDelta = 20;
+    int maskMorphKernel = 5;  // close broken Canny rings (the deinterlace softens edges)
+    double circTol = 0.45;    // |pi*r^2 - area| < pi*r^2*tol  (the native test)
+    double qTieBand = 0.02;   // quality band within which distance breaks ties
+};
+constexpr ContourParams kContour;
+
 // Two deinterlaced fields whose detected centers are within this many pixels are
 // treated as settled and averaged; otherwise only the newest field is reported.
 constexpr double kSettleAgreePx = 4.0;
+
+// Interlace comb / motion metric (detect_with_fields). A central pixel whose
+// deviations from its two vertical neighbours have the same sign and a product
+// over kCombPixThresh is a "comb" pixel -- the zigzag of two misaligned fields.
+// When the comb fraction exceeds kCombMovingFrac the head is moving. Settled
+// board detail sits ~0.03-0.07; real motion is the 0.10-0.39 tail (calibrated).
+constexpr int kCombPixThresh = 300;
+constexpr double kCombMovingFrac = 0.10;
 
 // Copy a per-field detection into the combined result (the fields shared by both
 // detectors). Used by detect_with_fields' combine branches.
@@ -112,38 +141,24 @@ bool save_frame(const void* frame, const char* path) {
         int origin = -1;
         cv::Mat wrapped = wrap_ipl(frame, origin);
         if (wrapped.empty()) return false;
-        cv::Mat out;
-        if (origin == IPL_ORIGIN_BL)
-            cv::flip(wrapped, out, 0);  // into a NEW Mat
-        else
-            out = wrapped.clone();  // copy; never touch live buffer
+        // ORIGIN: ignore the flag (treat top-down) so the captured PNG matches what
+        // the detector sees -- offline tuning runs on these frames. TODO(origin):
+        // not validated on this hardware -- revisit after the merge (see work item).
+        (void)origin;
+        cv::Mat out = wrapped.clone();  // copy; never touch live buffer
         return cv::imwrite(path, out);
     } catch (...) {
         return false;
     }
 }
 
-// Detect the copper mark in ONE already-deinterlaced, full-height grayscale
-// field image. cx comes out in full-frame x; cy is in this image's row space and
-// needs the caller's +-0.5 field correction. Returns found=false on no mark.
-// This is the per-field core; detect_circle_mark runs it on both fields.
-static MarkResult detect_one_field(const cv::Mat& gFull, int markSizePx,
-                                   double refX, double refY,
-                                   int searchRadiusPx) {
+// Core HoughCircles detector over ONE deinterlaced field, given an explicit radius
+// bracket [minRfull, maxRfull]. Used by the Circular mode ONLY; Round (CheckMark)
+// uses the contour detector, never Hough. cx in full-frame x; cy in field-row space
+// (caller applies the +-0.5 field correction). Returns found=false on no mark.
+static MarkResult detect_one_field_circle(const cv::Mat& gFull, int minRfull, int maxRfull,
+                                          double refX, double refY, int searchRadiusPx) {
     MarkResult r;
-
-    // Tight radius bracket locked to the inner 1mm copper; excludes the larger
-    // solder-mask ring that otherwise causes flip-flop jitter. markSizePx is the
-    // host "size" arg (algo=63 ~ 1.2mm). Computed first so it can size the ROI.
-    int minRfull, maxRfull;
-    if (markSizePx >= kCircle.markSizeLo && markSizePx <= kCircle.markSizeHi) {
-        minRfull = std::max(kCircle.radiusMinPx,
-                            static_cast<int>(markSizePx * kCircle.radiusMinFrac));
-        maxRfull = static_cast<int>(markSizePx * kCircle.radiusMaxFrac);
-    } else {
-        minRfull = kCircle.radiusFallbackMin;
-        maxRfull = kCircle.radiusFallbackMax;
-    }
 
     // Restrict the WHOLE pipeline to a ROI around the reference. The mark is
     // always within the search radius of it, so this cuts detection latency ~2x
@@ -192,7 +207,8 @@ static MarkResult detect_one_field(const cv::Mat& gFull, int markSizePx,
             best = static_cast<int>(i);
         }
     }
-    double fx = circles[best][0], fy = circles[best][1], fr = circles[best][2];
+    const size_t bi = static_cast<size_t>(best);
+    double fx = circles[bi][0], fy = circles[bi][1], fr = circles[bi][2];
 
     // Search-area ("Range") constraint: reject detections too far from the ref.
     if (searchRadiusPx > 0) {
@@ -283,6 +299,105 @@ static MarkResult detect_one_field(const cv::Mat& gFull, int markSizePx,
     return r;
 }
 
+// Circular (CheckMark2): radius bracket from the host "size" arg, locked to the
+// inner 1mm copper (excludes the larger solder-mask ring -> no flip-flop jitter).
+static MarkResult detect_one_field(const cv::Mat& gFull, int markSizePx,
+                                   double refX, double refY, int searchRadiusPx) {
+    int minRfull, maxRfull;
+    if (markSizePx >= kCircle.markSizeLo && markSizePx <= kCircle.markSizeHi) {
+        minRfull = std::max(kCircle.radiusMinPx,
+                            static_cast<int>(markSizePx * kCircle.radiusMinFrac));
+        maxRfull = static_cast<int>(markSizePx * kCircle.radiusMaxFrac);
+    } else {
+        minRfull = kCircle.radiusFallbackMin;
+        maxRfull = kCircle.radiusFallbackMax;
+    }
+    return detect_one_field_circle(gFull, minRfull, maxRfull, refX, refY, searchRadiusPx);
+}
+
+// Round (CheckMark algo==0): contour-circularity, faithful to the native Round.
+// HoughCircles is FORBIDDEN in this mode (it stays in CheckMark2/Circular only).
+// 13x13 Gaussian -> strength-scaled Canny -> Range-circle mask + morph-close the
+// broken ring -> findContours -> size + circularity + search gate -> the winning
+// contour's moment centroid. The size gate is a FIXED physical bracket (0.5..3.5mm
+// feature diameter, kContour.min/maxRadiusPx). The operator's Range (searchRadiusPx)
+// is used AS-IS for the search-area gate, NOT for sizing. cx in full-frame x; cy in
+// field-row space (caller applies the +-0.5 correction).
+static MarkResult detect_one_field_contour(const cv::Mat& gFull, double refX, double refY,
+                                           int searchRadiusPx, int strength) {
+    MarkResult r;
+    const int sN = std::clamp(strength, 1, 10);
+
+    const double rxF = (refX >= 0.0) ? refX : gFull.cols / 2.0;
+    const double ryF = (refY >= 0.0) ? refY : gFull.rows / 2.0;
+    const int sr = (searchRadiusPx > 0) ? searchRadiusPx : kContour.searchFallbackPx;
+    cv::Rect crop(0, 0, gFull.cols, gFull.rows);
+    if (refX >= 0.0 && refY >= 0.0) {
+        const int R = sr + kContour.roiPad;
+        cv::Rect c = cv::Rect(cvRound(rxF) - R, cvRound(ryF) - R, 2 * R, 2 * R) & cv::Rect(0, 0, gFull.cols, gFull.rows);
+        if (c.width > kContour.roiMinDimPx && c.height > kContour.roiMinDimPx) crop = c;
+    }
+    const cv::Mat g = gFull(crop);
+    const double cxRef = rxF - crop.x, cyRef = ryF - crop.y;
+
+    const double imgMean = cv::mean(g)[0];
+    if (imgMean < kContour.meanLo || imgMean > kContour.meanHi) return r;  // dropped/blown
+
+    cv::Mat sm, edges;
+    cv::GaussianBlur(g, sm, cv::Size(kContour.gaussKernel, kContour.gaussKernel), 0);
+    const int cannyLo = kContour.cannyStep * sN + kContour.cannyBase;
+    cv::Canny(sm, edges, cannyLo, cannyLo + kContour.cannyHighDelta, 3);
+
+    // Restrict to the Range circle, then close the broken ring (the deinterlace
+    // softens edges -> Canny rings come out broken -> fail circularity = dropouts).
+    cv::Mat mask = cv::Mat::zeros(edges.size(), CV_8U);
+    cv::circle(mask, cv::Point(cvRound(cxRef), cvRound(cyRef)), sr, cv::Scalar(255), -1);
+    cv::bitwise_and(edges, mask, edges);
+    cv::morphologyEx(edges, edges, cv::MORPH_CLOSE,
+                     cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(kContour.maskMorphKernel, kContour.maskMorphKernel)));
+
+    std::vector<std::vector<cv::Point>> contours;
+    cv::findContours(edges, contours, cv::RETR_LIST, cv::CHAIN_APPROX_NONE);
+    if (contours.empty()) return r;
+
+    const double minArea = CV_PI * kContour.minRadiusPx * kContour.minRadiusPx;
+    int best = -1;
+    double bestQ = -1.0, bestD = 1e18, fr = 0.0;
+    for (size_t i = 0; i < contours.size(); ++i) {
+        const std::vector<cv::Point>& c = contours[i];
+        const double area = std::abs(cv::contourArea(c));
+        if (area < minArea) continue;
+        cv::Point2f ec;
+        float encR = 0.0f;
+        cv::minEnclosingCircle(c, ec, encR);
+        if (encR < static_cast<float>(kContour.minRadiusPx) || encR > static_cast<float>(kContour.maxRadiusPx)) continue;
+        const double pr2 = CV_PI * encR * encR;
+        if (std::abs(pr2 - area) >= pr2 * kContour.circTol) continue;  // circularity
+        const double dx = ec.x - cxRef, dy = ec.y - cyRef, dist2 = dx * dx + dy * dy;
+        const double srd = static_cast<double>(searchRadiusPx);
+        if (searchRadiusPx > 0 && dist2 > srd * srd) continue;  // search-area gate
+        const double q = area / pr2;                            // ~1 = perfect circle
+        if (q > bestQ + kContour.qTieBand || (q > bestQ - kContour.qTieBand && dist2 < bestD)) {
+            bestQ = q;
+            bestD = dist2;
+            best = static_cast<int>(i);
+            fr = encR;
+        }
+    }
+    if (best < 0) return r;  // nothing circular passed
+
+    const std::vector<cv::Point>& win = contours[static_cast<size_t>(best)];
+    const cv::Moments mm = cv::moments(win);
+    if (mm.m00 <= 0.0) return r;
+
+    r.found = true;
+    r.cx = mm.m10 / mm.m00 + crop.x;
+    r.cy = mm.m01 / mm.m00 + crop.y;
+    r.radius = fr;
+    r.quality = std::min(1.0, bestQ);
+    return r;
+}
+
 // Field-aware wrapper: deinterlace the analog frame into its two time-separated
 // fields (even/odd scanlines, ~1/60s apart), upscale each back to full height,
 // run `perField` on BOTH, and combine. The STK1150 weaves the fields into one
@@ -294,10 +409,16 @@ static MarkResult detect_one_field(const cv::Mat& gFull, int markSizePx,
 // `perField` runs on one upscaled full-height field and returns a MarkResult
 // with cx in full-frame x and cy in field-row space; this wrapper applies the
 // +-0.5 row correction and combines. Reused by every field-aware detector
-// (circular, template, ...). NON-DESTRUCTIVE: copies out of the frame buffer.
+// (circular, template, contour). NON-DESTRUCTIVE: copies out of the frame buffer.
+//
+// Motion-adaptive (see the comb metric below): under MOTION it reports only the
+// most-recent single-instant field. When SETTLED it uses the two-field AVERAGE,
+// EXCEPT when wovenWhenSettled is set (Round contour) -- then it detects on the
+// sharp full-res woven frame, whose edges an upscaled field would soften.
 static MarkResult detect_with_fields(
     const void* frame,
-    const std::function<MarkResult(const cv::Mat&)>& perField) {
+    const std::function<MarkResult(const cv::Mat&)>& perField,
+    bool wovenWhenSettled = false) {
     MarkResult r;
 
     const IplImage* ipl = as_valid_ipl(frame);
@@ -324,12 +445,12 @@ static MarkResult detect_with_fields(
                         CV_MAKETYPE(CV_8U, ipl->nChannels),
                         ipl->imageData, static_cast<size_t>(ipl->widthStep));
 
-        // IplImage origin: 0 = top-left (top-down), 1 = bottom-left (bottom-up).
-        cv::Mat img;
-        if (ipl->origin == IPL_ORIGIN_BL)
-            cv::flip(wrapped, img, 0);
-        else
-            img = wrapped;
+        // ORIGIN: we IGNORE the IplImage origin flag and treat the frame as
+        // top-down. The down-vision camera toggles origin on camera-switch without
+        // changing the pixel layout, so honoring it flips detection (and the
+        // preview) upside-down. TODO(origin): neither ignore nor respect was
+        // validated on this hardware -- revisit after the merge (see work item).
+        const cv::Mat& img = wrapped;
 
         cv::Mat gray;
         if (img.channels() == 3)
@@ -349,36 +470,61 @@ static MarkResult detect_with_fields(
         cv::resize(evenF, evenU, cv::Size(gray.cols, gray.rows), 0, 0, cv::INTER_CUBIC);
         cv::resize(oddF, oddU, cv::Size(gray.cols, gray.rows), 0, 0, cv::INTER_CUBIC);
 
-        MarkResult re = perField(evenU);
-        MarkResult ro = perField(oddU);
-        if (re.found) re.cy -= 0.5;  // even field samples rows 2i   -> full-frame y
-        if (ro.found) ro.cy += 0.5;  // odd  field samples rows 2i+1 -> full-frame y
-
-        // The two fields are captured ~1/60 s apart. Combine them by motion state:
-        //  - settled (fields agree): AVERAGE -> full vertical resolution, cancels
-        //    the opposite +-0.5 row bias.
-        //  - moving (fields disagree): report ONLY the most-recent field; the
-        //    older field carries a stale head position that misdirects the host's
-        //    correction. These cameras are bottom-field-first (BFF): the bottom
-        //    field = odd rows (1,3,5) is captured FIRST (older); the top field =
-        //    even rows (0,2,4) is the most recent. So under motion we report the
-        //    EVEN field. (In normal operation this branch is rare -- the host only
-        //    reads vision at a move endpoint, so frames are almost always settled.)
-        if (re.found && ro.found) {
-            const double dx = re.cx - ro.cx, dy = re.cy - ro.cy;
-            if (dx * dx + dy * dy <= kSettleAgreePx * kSettleAgreePx) {
-                r.found = true;
-                r.cx = 0.5 * (re.cx + ro.cx);
-                r.cy = 0.5 * (re.cy + ro.cy);
-                r.radius = 0.5 * (re.radius + ro.radius);
-                r.quality = std::max(re.quality, ro.quality);
-            } else {
-                assign_result(r, re);  // BFF: even is newest
+        // Interlace comb / motion metric on the woven frame, central region: the
+        // fraction of "zigzag" pixels (deviating from both vertical neighbours the
+        // same way). High => the two ~1/60s-apart fields are misaligned => moving.
+        const int cx0 = std::max(1, gray.cols / 2 - 150), cx1 = std::min(gray.cols - 1, gray.cols / 2 + 150);
+        const int cy0 = std::max(1, gray.rows / 2 - 120), cy1 = std::min(gray.rows - 1, gray.rows / 2 + 120);
+        long comb = 0, total = 0;
+        for (int y = cy0; y < cy1; ++y) {
+            const uchar* rm = gray.ptr<uchar>(y);
+            const uchar* ra = gray.ptr<uchar>(y - 1);
+            const uchar* rb = gray.ptr<uchar>(y + 1);
+            for (int x = cx0; x < cx1; ++x) {
+                const int d1 = static_cast<int>(rm[x]) - static_cast<int>(ra[x]);
+                const int d2 = static_cast<int>(rm[x]) - static_cast<int>(rb[x]);
+                if (d1 * d2 > kCombPixThresh) ++comb;
+                ++total;
             }
-        } else if (re.found) {
-            assign_result(r, re);
-        } else if (ro.found) {
-            assign_result(r, ro);
+        }
+        r.combFrac = total > 0 ? static_cast<double>(comb) / static_cast<double>(total) : 0.0;
+
+        // Pick the detection source by motion state. BFF: the even rows (0,2,4) are
+        // the most-recent field; even samples rows 2i, so its y needs the -0.5.
+        if (r.combFrac > kCombMovingFrac) {
+            // MOVING: only the most-recent single-instant field (no comb).
+            MarkResult re = perField(evenU);
+            if (re.found) {
+                re.cy -= 0.5;
+                assign_result(r, re);
+            }
+        } else if (wovenWhenSettled) {
+            // SETTLED, contour (Round): the sharp full-res woven frame.
+            MarkResult rw = perField(gray);
+            if (rw.found) assign_result(r, rw);
+        } else {
+            // SETTLED, Circular/ImageTemplate: the validated two-field AVERAGE --
+            // robust to residual ring-down and halves the sub-pixel scatter.
+            MarkResult re = perField(evenU);
+            MarkResult ro = perField(oddU);
+            if (re.found) re.cy -= 0.5;  // even field samples rows 2i   -> full-frame y
+            if (ro.found) ro.cy += 0.5;  // odd  field samples rows 2i+1 -> full-frame y
+            if (re.found && ro.found) {
+                const double dx = re.cx - ro.cx, dy = re.cy - ro.cy;
+                if (dx * dx + dy * dy <= kSettleAgreePx * kSettleAgreePx) {
+                    r.found = true;
+                    r.cx = 0.5 * (re.cx + ro.cx);
+                    r.cy = 0.5 * (re.cy + ro.cy);
+                    r.radius = 0.5 * (re.radius + ro.radius);
+                    r.quality = std::max(re.quality, ro.quality);
+                } else {
+                    assign_result(r, re);  // BFF: even is newest
+                }
+            } else if (re.found) {
+                assign_result(r, re);
+            } else if (ro.found) {
+                assign_result(r, ro);
+            }
         }
     } catch (...) {
         r.found = false;  // never let an exception reach the host
@@ -433,7 +579,9 @@ static MarkResult detect_template_one_field(const cv::Mat& g, const cv::Mat& tb,
     for (int pass = 0; pass < 2; ++pass) {
         const double a = (locked && pass == 0) ? *ioScale : kTmpl.scaleSweepLo;
         const double b = (locked && pass == 0) ? *ioScale : kTmpl.scaleSweepHi;
-        for (double scl = a; scl <= b + 1e-9; scl += kTmpl.scaleStep) {
+        const int nScl = static_cast<int>(std::lround((b - a) / kTmpl.scaleStep)) + 1;
+        for (int si = 0; si < nScl; ++si) {
+            const double scl = a + si * kTmpl.scaleStep;
             cv::Mat ts;
             if (std::fabs(scl - 1.0) < 1e-6)
                 ts = tb;
@@ -538,10 +686,28 @@ MarkResult detect_template_mark(const void* frame, const unsigned char* template
     if (tb.empty())
         return detect_with_fields(frame, [](const cv::Mat&) { return MarkResult(); });
 
-    return detect_with_fields(frame, [&](const cv::Mat& g) {
+    MarkResult r = detect_with_fields(frame, [&](const cv::Mat& g) {
         return detect_template_one_field(g, tb, size, strength, refX, refY,
                                          searchRadiusPx, ioScale);
     });
+    r.shape = MarkShape::Square;  // ImageTemplate: the preview draws the matched square
+    return r;
+}
+
+// Round (CheckMark algo==0): contour-circularity detector (NOT Hough -- Hough is
+// banned in CheckMark mode). Feature size gated by a fixed 0.5-3.5mm bracket;
+// searchRadiusPx (the operator's Range) is used as-is for the search-area gate.
+// Woven-when-settled: an upscaled field's soft edges break the ring up, so when
+// settled it runs on the sharp full-res frame. The preview draws a circle at the
+// detected center/radius. NON-DESTRUCTIVE.
+MarkResult detect_round_mark(const void* frame, double refX, double refY,
+                             int searchRadiusPx, int strength) {
+    MarkResult r = detect_with_fields(
+        frame,
+        [&](const cv::Mat& g) { return detect_one_field_contour(g, refX, refY, searchRadiusPx, strength); },
+        /*wovenWhenSettled=*/true);
+    r.shape = MarkShape::Circle;
+    return r;
 }
 
 }  // namespace vis

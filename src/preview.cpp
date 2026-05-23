@@ -36,11 +36,11 @@ bool render_preview(const void* frame, void* hwndV, double mvoX, double mvoY,
         cv::Mat wrapped = detail::wrap_ipl(frame, origin);
         if (wrapped.empty()) return false;
 
-        cv::Mat img;
-        if (origin == IPL_ORIGIN_BL)
-            cv::flip(wrapped, img, 0);
-        else
-            img = wrapped;
+        // ORIGIN: ignore the flag (the down-vision camera toggles it spuriously) and
+        // treat the frame top-down, so the preview matches detection. TODO(origin):
+        // not validated on this hardware -- revisit after the merge (see work item).
+        (void)origin;
+        cv::Mat img = wrapped;
         cv::Mat bgr;
         if (img.channels() == 1)
             cv::cvtColor(img, bgr, cv::COLOR_GRAY2BGR);
@@ -86,14 +86,31 @@ bool render_preview(const void* frame, void* hwndV, double mvoX, double mvoY,
         if (searchRadiusPx > 0)
             cv::circle(work, cv::Point(cw / 2, ch / 2), searchRadiusPx, cv::Scalar(0, 0, 255), RT);
 
-        // Our detection (green) mapped from frame coords into crop coords.
+        // Our detection (green) mapped from frame coords into crop coords. The
+        // overlay style depends on the mode: a square for ImageTemplate (the
+        // matched region), else a circle (Circular and Round).
         if (mr.found) {
             const double cropLeft = cx - cw / 2.0;
             const double cropTop = cy - ch / 2.0;
             const int u = cvRound((W - mr.cx) - cropLeft);
             const int v = cvRound((H - mr.cy) - cropTop);
-            cv::circle(work, cv::Point(u, v), cvRound(mr.radius), cv::Scalar(0, 255, 0), 2);
-            cv::drawMarker(work, cv::Point(u, v), cv::Scalar(0, 255, 0), cv::MARKER_CROSS, 14, 2);
+            const int rad = cvRound(mr.radius);
+            const cv::Scalar green(0, 255, 0);
+            if (mr.shape == MarkShape::Square)
+                cv::rectangle(work, cv::Point(u - rad, v - rad), cv::Point(u + rad, v + rad), green, 2);
+            else
+                cv::circle(work, cv::Point(u, v), rad, green, 2);
+            cv::drawMarker(work, cv::Point(u, v), green, cv::MARKER_CROSS, 14, 2);
+
+            // Annotate with match-quality (mq) and diameter (px), centered just
+            // above the marker. Black outline first so it stays legible on any bg.
+            const cv::String tag = cv::format("mq%.2f d%d", mr.quality, 2 * rad);
+            const double fs = 0.42;
+            int baseline = 0;
+            const cv::Size ts = cv::getTextSize(tag, cv::FONT_HERSHEY_SIMPLEX, fs, 1, &baseline);
+            const cv::Point tp(u - ts.width / 2, v - rad - 4);
+            cv::putText(work, tag, tp, cv::FONT_HERSHEY_SIMPLEX, fs, cv::Scalar(0, 0, 0), 3, cv::LINE_AA);
+            cv::putText(work, tag, tp, cv::FONT_HERSHEY_SIMPLEX, fs, green, 1, cv::LINE_AA);
         }
 
         if (!work.isContinuous()) work = work.clone();

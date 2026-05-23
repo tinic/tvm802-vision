@@ -17,6 +17,44 @@ env:
   VCPKG_DEFAULT_TRIPLET: x86-windows-static
 
 jobs:
+  # Required code-quality gate: formatting, static analysis, and the host-arch
+  # build + tests. The portable detector core is also clang-tidy'd here; the
+  # Windows-GDI translation units are warnings-as-errors-checked by the `build`
+  # job's MSVC /W4 /WX build (they need <windows.h>). Mirrored locally by
+  # tools/check.sh.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang-format clang-tidy cppcheck cmake g++ \
+            libopencv-dev
+
+      - name: clang-format (style)
+        run: clang-format --dry-run --Werror src/*.cpp src/*.h
+
+      - name: cppcheck (static analysis)
+        run: |
+          cppcheck --enable=all --std=c++17 --language=c++ -I src \
+            --suppress=missingIncludeSystem --suppress=checkersReport \
+            --suppress=normalCheckLevelMaxBranches --suppress=unmatchedSuppression \
+            --suppress=unusedFunction --error-exitcode=2 src
+
+      - name: Configure (host tests + compile DB)
+        run: cmake -S . -B build-lint -DBUILD_TESTS=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+      - name: clang-tidy (portable detector core)
+        run: clang-tidy -p build-lint src/vision.cpp
+
+      - name: Build + test (host arch)
+        run: |
+          cmake --build build-lint
+          ctest --test-dir build-lint --output-on-failure
+
   build:
     runs-on: windows-latest
     steps:
