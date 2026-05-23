@@ -63,11 +63,17 @@ With SurfaceMount **closed**: back up your `MVision.dll`, rename the original to
 
 ## Tuning
 
-**Fiducial size** is set in the app UI, *not* in code — the detector scales its
-radius bracket to the host's mark-size setting, so set that to match your fiducial.
-Detector logic is one-per-file under `src/` (`detect_circle.cpp`,
-`detect_template.cpp`, `detect_symmetry.cpp`), with the shared field/frame plumbing
-in `detect_common.cpp`; tuning constants live at the top of each.
+Most adjustment is in the app UI, not the code:
+
+- **Circular** scales its detection radius to the app's **mark-size** setting —
+  set it to match your fiducial; no code change needed.
+- **ImageTemplate** uses the template image you teach in the UI.
+- **Round** takes any round feature in a fixed 0.5–3.5 mm bracket, searched within
+  the app's **Range** value.
+
+Code-level constants live near the top of the per-mode files under `src/`
+(`detect_circle.cpp`, `detect_template.cpp`, `detect_symmetry.cpp`; shared
+field/frame plumbing in `detect_common.cpp`).
 
 ## Caveats
 
