@@ -92,13 +92,13 @@ bool render_preview(const void* frame, void* hwndV, double mvoX, double mvoY,
                           cv::Point2f((float)cx, (float)cy), work);
         if (work.type() != CV_8UC3) return false;
 
-        const int RT = 2;  // red overlay thickness (crisp at 1:1, more visible)
+        const int RT = 1;  // red overlay thickness -- 1px, antialiased on the 1:1 display
         // Reference crosshair (red) at the crop center == the reference point.
-        cv::line(work, cv::Point(cw / 2, 0), cv::Point(cw / 2, ch), cv::Scalar(0, 0, 255), RT);
-        cv::line(work, cv::Point(0, ch / 2), cv::Point(cw, ch / 2), cv::Scalar(0, 0, 255), RT);
+        cv::line(work, cv::Point(cw / 2, 0), cv::Point(cw / 2, ch), cv::Scalar(0, 0, 255), RT, cv::LINE_AA);
+        cv::line(work, cv::Point(0, ch / 2), cv::Point(cw, ch / 2), cv::Scalar(0, 0, 255), RT, cv::LINE_AA);
         // Search-area ("Range") circle (red) — detection is limited to inside this.
         if (searchRadiusPx > 0)
-            cv::circle(work, cv::Point(cw / 2, ch / 2), searchRadiusPx, cv::Scalar(0, 0, 255), RT);
+            cv::circle(work, cv::Point(cw / 2, ch / 2), searchRadiusPx, cv::Scalar(0, 0, 255), RT, cv::LINE_AA);
 
         // Our detection (green) mapped from frame coords into crop coords. The
         // overlay style depends on the mode: a square for ImageTemplate (the
@@ -111,10 +111,10 @@ bool render_preview(const void* frame, void* hwndV, double mvoX, double mvoY,
             const int rad = cvRound(mr.radius);
             const cv::Scalar green(0, 255, 0);
             if (mr.shape == MarkShape::Square)
-                cv::rectangle(work, cv::Point(u - rad, v - rad), cv::Point(u + rad, v + rad), green, 2);
+                cv::rectangle(work, cv::Point(u - rad, v - rad), cv::Point(u + rad, v + rad), green, 1, cv::LINE_AA);
             else
-                cv::circle(work, cv::Point(u, v), rad, green, 2);
-            cv::drawMarker(work, cv::Point(u, v), green, cv::MARKER_CROSS, 14, 2);
+                cv::circle(work, cv::Point(u, v), rad, green, 1, cv::LINE_AA);
+            cv::drawMarker(work, cv::Point(u, v), green, cv::MARKER_CROSS, 14, 1, cv::LINE_AA);
         }
 
         // Discoverability hint for the settings dialog (black outline + light text so
