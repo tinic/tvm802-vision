@@ -17,8 +17,6 @@
 #include "capture.h"
 #include "vision.h"
 
-#include <algorithm>
-#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <chrono>
@@ -169,7 +167,10 @@ void set_our_comp_result(const vis::CompResult& cr) {
     g_compW = cr.w * kUpScale;
     g_compH = cr.h * kUpScale;
     g_compA = kUpAngleSign * cr.angle;
-    g_compMin = cr.found ? std::max(0.0, 1.0 - cr.quality) : 1.0;  // 0 = best
+    // quality (higher=better) -> min_val (0=best). Plain clamp, NOT std::max: this TU
+    // includes <windows.h>, whose max() macro mangles std::max(...).
+    const double q = 1.0 - cr.quality;
+    g_compMin = cr.found ? (q > 0.0 ? q : 0.0) : 1.0;
     g_resultSrc = ResultSrc::Comp;
 }
 
@@ -401,13 +402,21 @@ int __stdcall CheckComp(void* f, int hwnd, int w, int h) {
                                                g_compThreshold, refX, refY, 0);
     g_detMs = ms_since(t0);
 
+    // `if constexpr` so the shadow-default build (kCompDrive=false) doesn't trip MSVC
+    // C4127 (constant condition) under /WX; the drive branch is discarded but still
+    // compiled, so set_our_comp_result stays referenced.
     int rc;
-    if (kCompDrive && cr.found) {
-        set_our_comp_result(cr);             // our pose drives via comp-mode GetOffset
-        mv::orig::CheckComp(f, hwnd, w, h);  // original called for its preview only
-        rc = 0;
+    if constexpr (kCompDrive) {
+        if (cr.found) {
+            set_our_comp_result(cr);             // our pose drives via comp-mode GetOffset
+            mv::orig::CheckComp(f, hwnd, w, h);  // original called for its preview only
+            rc = 0;
+        } else {
+            g_resultSrc = ResultSrc::Original;  // our miss -> original drives
+            rc = mv::orig::CheckComp(f, hwnd, w, h);
+        }
     } else {
-        g_resultSrc = ResultSrc::Original;  // original drives (shadow mode / our miss)
+        g_resultSrc = ResultSrc::Original;  // shadow mode: original drives
         rc = mv::orig::CheckComp(f, hwnd, w, h);
     }
     maybe_log_comp(f, cr);
