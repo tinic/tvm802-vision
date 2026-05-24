@@ -43,6 +43,7 @@ enum : int { ID_TIMER = 1,
 // Settings <-> trackbar mapping.
 enum Kind { K_PX,
             K_THR,
+            K_SENS,  // Round accept threshold: quadratic curve (fine low end), 0 = "Auto"
             K_GAMMA,
             K_SINT,
             K_INT,
@@ -75,7 +76,7 @@ struct SliderDef {
 const SliderDef kDefs[S_COUNT] = {
     {"Radius min", 0, 120, K_PX, 46},          // S_RMIN
     {"Radius max", 0, 120, K_PX, 71},          // S_RMAX
-    {"Sensitivity", 0, 100, K_THR, 96},        // S_SYM   (accept threshold x10)
+    {"Sensitivity", 0, 200, K_SENS, 96},       // S_SYM   (accept threshold, quadratic map)
     {"Gamma", 0, 40, K_GAMMA, 214},            // S_GAMMA (x10)
     {"Brightness", -128, 128, K_SINT, 239},    // S_BRI
     {"Contrast", 0, 30, K_THR, 264},           // S_CON   (x10)
@@ -155,11 +156,34 @@ HWND make_button(HWND parent, int id, const char* text, int x, int y, int w, int
                            reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), g_inst, nullptr);
 }
 
+// The Sensitivity slider maps to minSymmetry on a QUADRATIC curve, not linearly:
+// the useful decision band is tiny and low (real fiducials score ~2.6-4.6,
+// distractors ~1.2-1.7), so a linear 0-10 crammed all the tuning into the lower
+// half with 0.1 steps. The square curve gives the low end ~71% of the travel and
+// ~0.05 resolution while still reaching 10. pos 0 = Auto (detector default 3.5).
+constexpr int kSensTicks = 200;
+constexpr double kSensMax = 10.0;
+
+double sens_pos_to_val(int pos) {
+    if (pos <= 0) return 0.0;
+    const double f = static_cast<double>(pos) / kSensTicks;
+    return kSensMax * f * f;
+}
+
+int sens_val_to_pos(double val) {
+    if (val <= 0.0) return 0;
+    int p = static_cast<int>(std::lround(std::sqrt(val / kSensMax) * kSensTicks));
+    if (p < 1) p = 1;
+    if (p > kSensTicks) p = kSensTicks;
+    return p;
+}
+
 void format_value(Kind kind, int pos, char* buf, size_t n) {
     const double t = static_cast<double>(pos) / 10.0;
     switch (kind) {
         case K_PX: pos <= 0 ? std::snprintf(buf, n, "Auto") : std::snprintf(buf, n, "%d px", pos); break;
         case K_THR: pos <= 0 ? std::snprintf(buf, n, "Auto") : std::snprintf(buf, n, "%.1f", t); break;
+        case K_SENS: pos <= 0 ? std::snprintf(buf, n, "Auto") : std::snprintf(buf, n, "%.2f", sens_pos_to_val(pos)); break;
         case K_GAMMA: pos <= 0 ? std::snprintf(buf, n, "off") : std::snprintf(buf, n, "%.1f", t); break;
         case K_SINT: pos == 0 ? std::snprintf(buf, n, "0") : std::snprintf(buf, n, "%+d", pos); break;
         case K_INT: pos <= 0 ? std::snprintf(buf, n, "0") : std::snprintf(buf, n, "%d", pos); break;
@@ -201,7 +225,7 @@ double map_to_setting(Idx i, int pos) {
         case S_EXPHI:
         case S_BLUR: return pos > 0 ? static_cast<double>(pos) : 0.0;
         case S_BRI: return static_cast<double>(pos);  // signed, 0 = off
-        case S_SYM:
+        case S_SYM: return sens_pos_to_val(pos);      // quadratic curve, 0 = Auto
         case S_GAMMA:
         case S_CON: return pos > 0 ? static_cast<double>(pos) / 10.0 : 0.0;
         case S_SHP: return pos != 0 ? static_cast<double>(pos) / 10.0 : 0.0;
@@ -255,7 +279,7 @@ void controls_from_settings() {
     int pos[S_COUNT];
     pos[S_RMIN] = static_cast<int>(s.radiusMinPx);
     pos[S_RMAX] = static_cast<int>(s.radiusMaxPx);
-    pos[S_SYM] = static_cast<int>(std::lround(s.minSymmetry * 10.0));
+    pos[S_SYM] = sens_val_to_pos(s.minSymmetry);
     pos[S_GAMMA] = static_cast<int>(std::lround(s.gamma * 10.0));
     pos[S_BRI] = static_cast<int>(std::lround(s.brightness));
     pos[S_CON] = static_cast<int>(std::lround(s.contrast * 10.0));
