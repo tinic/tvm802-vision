@@ -289,13 +289,13 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             make_static(hwnd, "- Image adjustments -", 12, 196, 240, 16);
 
             for (int i = 0; i < S_COUNT; ++i) {
-                make_static(hwnd, kDefs[i].label, 12, kDefs[i].y + 2, 70, 18);
+                make_static(hwnd, kDefs[i].label, 12, kDefs[i].y + 2, 90, 18);  // wide enough for "Exposure min"
                 g_tb[i] = CreateWindowExA(0, "msctls_trackbar32", "",
                                           WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
-                                          86, kDefs[i].y, 200, 24, hwnd, nullptr, g_inst, nullptr);
+                                          106, kDefs[i].y, 176, 24, hwnd, nullptr, g_inst, nullptr);
                 SendMessageA(g_tb[i], TBM_SETRANGEMIN, FALSE, static_cast<LPARAM>(kDefs[i].lo));
                 SendMessageA(g_tb[i], TBM_SETRANGEMAX, TRUE, static_cast<LPARAM>(kDefs[i].hi));
-                g_lblVal[i] = make_static(hwnd, "Auto", 290, kDefs[i].y + 2, 66, 18);
+                g_lblVal[i] = make_static(hwnd, "Auto", 288, kDefs[i].y + 2, 70, 18);
             }
 
             g_chkMedian = CreateWindowExA(0, "BUTTON", "Median ring scoring (robust to glare)",
