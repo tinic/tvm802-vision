@@ -118,13 +118,17 @@ bool render_preview(const void* frame, void* hwndV, double mvoX, double mvoY,
         }
 
         // Discoverability hint for the settings dialog (black outline + light text so
-        // it reads on any background). Bottom-left of the crop.
+        // it reads on any background). TOP-RIGHT, clear of the host's stats overlay
+        // (bottom) and the "Switch" camera button (top-left).
         {
-            const cv::Point at(6, ch - 8);
-            cv::putText(work, "Ctrl+Alt+M: settings", at, cv::FONT_HERSHEY_SIMPLEX, 0.4,
-                        cv::Scalar(0, 0, 0), 2, cv::LINE_AA);
-            cv::putText(work, "Ctrl+Alt+M: settings", at, cv::FONT_HERSHEY_SIMPLEX, 0.4,
-                        cv::Scalar(210, 210, 210), 1, cv::LINE_AA);
+            const char* hint = "Ctrl+Alt+M: settings";
+            int baseline = 0;
+            const cv::Size ts = cv::getTextSize(hint, cv::FONT_HERSHEY_SIMPLEX, 0.4, 1, &baseline);
+            int hx = cw - ts.width - 6;
+            if (hx < 6) hx = 6;
+            const cv::Point at(hx, ts.height + 6);
+            cv::putText(work, hint, at, cv::FONT_HERSHEY_SIMPLEX, 0.4, cv::Scalar(0, 0, 0), 2, cv::LINE_AA);
+            cv::putText(work, hint, at, cv::FONT_HERSHEY_SIMPLEX, 0.4, cv::Scalar(210, 210, 210), 1, cv::LINE_AA);
         }
 
         if (!work.isContinuous()) work = work.clone();
