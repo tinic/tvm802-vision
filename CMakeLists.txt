@@ -77,6 +77,7 @@ if(_build_dll)
         src/settings.cpp
         src/settings_ui.cpp
         src/preview.cpp
+        src/controller.cpp
     )
 
     # Build one MVision.dll. use_avx2=ON emits AVX2+FMA in OUR translation units
@@ -92,7 +93,9 @@ if(_build_dll)
             OUTPUT_NAME "${output_name}" PREFIX "" SUFFIX ".dll")
         target_include_directories(${target} PRIVATE src)
         # gdi32: preview.cpp uses GDI (StretchDIBits, GetStockObject, ...).
-        target_link_libraries(${target} PRIVATE ${OpenCV_LIBS} Threads::Threads kernel32 user32 gdi32 comctl32)
+        # ws2_32 + iphlpapi: controller.cpp reads the px/mm scale from the motion
+        # controller (TCP), discovering its endpoint via the host's own connection.
+        target_link_libraries(${target} PRIVATE ${OpenCV_LIBS} Threads::Threads kernel32 user32 gdi32 comctl32 ws2_32 iphlpapi)
         target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS)
         target_compile_options(${target} PRIVATE ${MVISION_WARNINGS})
         if(MSVC)
