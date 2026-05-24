@@ -286,10 +286,6 @@ template <class Detect, class OrigRender>
 int run_mark_check(const void* f, int hwnd, const char* name, int logAlgo, int logRange,
                    Detect&& detect, OrigRender&& origRender,
                    const std::function<vis::MarkResult(double, double, int)>& shadow = {}) {
-    // Start the settings UI on first down-vision check (never in DllMain -> no loader
-    // lock). Idempotent; the UI is inert until the operator presses the hotkey.
-    std::call_once(g_uiOnce, [] { vis::start_settings_ui(); });
-
     double refX = 0.0, refY = 0.0;
     reference_point(f, &refX, &refY);
     const int searchR = (g_areaMin > kAreaMinPx && g_areaMin < kAreaMaxPx)
@@ -349,6 +345,11 @@ HANDLE __stdcall GetCameraHandle(int idx) {
     return mv::orig::GetCameraHandle(idx);
 }
 void* __stdcall QueryFrame(void* cam, int timeout) {
+    // Start the settings UI thread on the first frame (never in DllMain -> no loader
+    // lock), so the Ctrl+Alt+M hotkey is live as soon as the camera streams.
+    // Idempotent; the dialog stays hidden until the operator opens it.
+    std::call_once(g_uiOnce, [] { vis::start_settings_ui(); });
+
     auto t0 = clk::now();
     void* r = mv::orig::QueryFrame(cam, timeout);
     // Freshness + settle guard. Two problems:

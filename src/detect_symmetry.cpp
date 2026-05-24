@@ -160,7 +160,9 @@ MarkResult detect_one_field_csym(const cv::Mat& gFull, const CircularSymmetry& s
 }  // namespace
 
 CircularSymmetry::CircularSymmetry(double minRadiusPx, double maxRadiusPx, int ringStep) {
-    const int nRings = static_cast<int>((maxRadiusPx - minRadiusPx) / ringStep) + 1;
+    if (ringStep < 1) ringStep = 1;
+    int nRings = static_cast<int>((maxRadiusPx - minRadiusPx) / ringStep) + 1;
+    if (nRings < 1) nRings = 1;  // guard: an inverted bracket must NOT reserve(negative -> huge)
     ringStart_.reserve(static_cast<size_t>(nRings) + 1);
     ringR_.reserve(static_cast<size_t>(nRings));
     for (int ri = 0; ri < nRings; ++ri) {
@@ -230,21 +232,33 @@ double CircularSymmetry::score(const cv::Mat& g, double cx, double cy, double& e
 // un-softened woven edges the contour detector relies on).
 MarkResult detect_circular_symmetry(const void* frame, double refX, double refY,
                                     int searchRadiusPx, int minDiaPx, int maxDiaPx) {
-    // Precedence: UI/settings override > caller's diameter hint > built-in default.
-    const Settings cfg = get_settings();
-    const double minR = cfg.radiusMinPx > 0.0 ? cfg.radiusMinPx
-                        : (minDiaPx > 0)      ? minDiaPx / 2.0
-                                              : static_cast<double>(kCsym.minRadiusPx);
-    const double maxR = cfg.radiusMaxPx > 0.0 ? cfg.radiusMaxPx
-                        : (maxDiaPx > 0)      ? maxDiaPx / 2.0
-                                              : static_cast<double>(kCsym.maxRadiusPx);
-    const double minSym = cfg.minSymmetry > 0.0 ? cfg.minSymmetry : kCsym.minSymmetry;
-    const CircularSymmetry sym(minR, maxR, kCsym.ringStep);
-    MarkResult r = detect_with_fields(frame, [&](const cv::Mat& g) {
-        return detect_one_field_csym(g, sym, refX, refY, searchRadiusPx, maxR, minSym, cfg);
-    });
-    r.shape = MarkShape::Circle;
-    return r;
+    // EXCEPTION BARRIER: called across a plain C ABI from the host. The ring builder
+    // and OpenCV can throw (e.g. on a bad UI radius bracket / OOM); never let that
+    // unwind into the .NET host (undefined behavior, crash). Report not-found instead.
+    try {
+        // Precedence: UI/settings override > caller's diameter hint > built-in default.
+        const Settings cfg = get_settings();
+        double minR = cfg.radiusMinPx > 0.0 ? cfg.radiusMinPx
+                      : (minDiaPx > 0)      ? minDiaPx / 2.0
+                                            : static_cast<double>(kCsym.minRadiusPx);
+        double maxR = cfg.radiusMaxPx > 0.0 ? cfg.radiusMaxPx
+                      : (maxDiaPx > 0)      ? maxDiaPx / 2.0
+                                            : static_cast<double>(kCsym.maxRadiusPx);
+        // Guard the bracket: an inverted/degenerate one (e.g. the user raised the min
+        // slider above the still-Auto max) would otherwise make the ring builder
+        // reserve a negative count -> throw. Widen to a sane bracket instead.
+        if (minR < 1.0) minR = 1.0;
+        if (maxR <= minR) maxR = minR + static_cast<double>(kCsym.maxRadiusPx - kCsym.minRadiusPx);
+        const double minSym = cfg.minSymmetry > 0.0 ? cfg.minSymmetry : kCsym.minSymmetry;
+        const CircularSymmetry sym(minR, maxR, kCsym.ringStep);
+        MarkResult r = detect_with_fields(frame, [&](const cv::Mat& g) {
+            return detect_one_field_csym(g, sym, refX, refY, searchRadiusPx, maxR, minSym, cfg);
+        });
+        r.shape = MarkShape::Circle;
+        return r;
+    } catch (...) {
+        return MarkResult{};
+    }
 }
 
 }  // namespace vis

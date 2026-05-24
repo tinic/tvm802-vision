@@ -12,6 +12,8 @@
 
 #include "vision.h"
 
+#include "settings.h"
+
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/imgcodecs.hpp>
@@ -116,6 +118,37 @@ int synthetic_comp_check() {
     return rc;
 }
 
+// Regression: a settings radius bracket where min > max (e.g. the operator raised
+// the min slider above the still-Auto max) once made the ring builder reserve a
+// negative count -> std::length_error -> crash across the host ABI. It must now be
+// guarded and return gracefully, never throw.
+int inverted_bracket_check() {
+    cv::Mat img(480, 640, CV_8UC1, cv::Scalar(45));
+    cv::circle(img, cv::Point(322, 241), 14, cv::Scalar(225), -1, cv::LINE_AA);
+    IplImage ipl = make_ipl(img);
+
+    vis::Settings bad;
+    bad.radiusMinPx = 50.0;  // above the default max (34) with max left Auto -> inverted
+    bad.radiusMaxPx = 0.0;
+    vis::set_settings(bad);
+    bool threw = false;
+    vis::MarkResult r;
+    try {
+        r = vis::detect_circular_symmetry(&ipl, 320.0, 240.0, 120);
+    } catch (...) {
+        threw = true;
+    }
+    vis::set_settings(vis::Settings{});  // restore defaults for the other checks
+
+    std::printf("inverted-bracket: threw=%d found=%d\n", threw ? 1 : 0, r.found ? 1 : 0);
+    if (threw) {
+        std::printf("FAIL: detector threw on an inverted radius bracket\n");
+        return 1;
+    }
+    std::printf("PASS: inverted bracket handled without throwing\n");
+    return 0;
+}
+
 int run_over_files(int n, char** paths) {
     std::printf("file,found,cx,cy,radius,quality\n");
     int rc = 0;
@@ -141,5 +174,5 @@ int run_over_files(int n, char** paths) {
 int main(int argc, char** argv) {
     if (argc > 1) return run_over_files(argc - 1, argv + 1);
     const int rc = synthetic_self_check();
-    return rc | synthetic_comp_check();
+    return rc | synthetic_comp_check() | inverted_bracket_check();
 }
