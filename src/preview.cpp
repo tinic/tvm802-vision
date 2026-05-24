@@ -7,7 +7,9 @@
 
 #include "vision.h"
 
+#include "detect_common.h"
 #include "iplframe.h"
+#include "settings.h"
 
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
@@ -41,13 +43,20 @@ bool render_preview(const void* frame, void* hwndV, double mvoX, double mvoY,
         // not validated on this hardware -- revisit after the merge (see work item).
         (void)origin;
         cv::Mat img = wrapped;
-        cv::Mat bgr;
+        // Show the SAME image the detector sees: extract gray on an OWNED copy (never
+        // the live buffer), apply the UI image adjustments (no-op when neutral), then
+        // colorize for the overlay. So dragging gamma/contrast/levels/sharpen is
+        // visible in the preview, not just in the lock/no-lock readout.
+        cv::Mat gray;
         if (img.channels() == 1)
-            cv::cvtColor(img, bgr, cv::COLOR_GRAY2BGR);
+            gray = img.clone();
         else if (img.channels() == 3)
-            bgr = img;
+            cv::extractChannel(img, gray, 0);  // mono capture: plane 0 == gray
         else
             return false;
+        apply_image_adjustments(gray, get_settings());
+        cv::Mat bgr;
+        cv::cvtColor(gray, bgr, cv::COLOR_GRAY2BGR);
 
         const int W = bgr.cols, H = bgr.rows;
         cv::Mat flipped;
