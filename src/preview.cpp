@@ -7,6 +7,7 @@
 
 #include "vision.h"
 
+#include "controller.h"
 #include "detect_common.h"
 #include "iplframe.h"
 #include "settings.h"
@@ -99,6 +100,37 @@ bool render_preview(const void* frame, void* hwndV, double mvoX, double mvoY,
         // Search-area ("Range") circle (red) — detection is limited to inside this.
         if (searchRadiusPx > 0)
             cv::circle(work, cv::Point(cw / 2, ch / 2), searchRadiusPx, cv::Scalar(0, 0, 255), RT, cv::LINE_AA);
+
+        // 0.5 mm tick marks along the crosshair, from the controller's px/mm scale
+        // (down camera — this preview is the down-vision mark modes). Anisotropic:
+        // the X scale spaces the horizontal axis, Y the vertical. Every 1.0 mm tick
+        // is drawn longer. Absent until the background controller read lands.
+        if (const CamScale sc = down_cam_scale(); sc.valid && sc.xMmPerPx > 0.0 && sc.yMmPerPx > 0.0) {
+            const cv::Scalar red(0, 0, 255);
+            const int cxp = cw / 2, cyp = ch / 2;
+            const double pxHalfX = 0.5 / sc.xMmPerPx;  // px per 0.5 mm, horizontal
+            const double pxHalfY = 0.5 / sc.yMmPerPx;  // px per 0.5 mm, vertical
+            for (int n = 1; n < 500; ++n) {
+                const int d = static_cast<int>(std::lround(n * pxHalfX));
+                if (cxp - d < 0 && cxp + d >= cw) break;
+                const int len = (n % 2 == 0) ? 9 : 5;  // 1.0 mm longer than 0.5 mm
+                for (int sgn = -1; sgn <= 1; sgn += 2) {
+                    const int x = cxp + sgn * d;
+                    if (x >= 0 && x < cw)
+                        cv::line(work, cv::Point(x, cyp - len), cv::Point(x, cyp + len), red, RT, cv::LINE_AA);
+                }
+            }
+            for (int n = 1; n < 500; ++n) {
+                const int d = static_cast<int>(std::lround(n * pxHalfY));
+                if (cyp - d < 0 && cyp + d >= ch) break;
+                const int len = (n % 2 == 0) ? 9 : 5;
+                for (int sgn = -1; sgn <= 1; sgn += 2) {
+                    const int y = cyp + sgn * d;
+                    if (y >= 0 && y < ch)
+                        cv::line(work, cv::Point(cxp - len, y), cv::Point(cxp + len, y), red, RT, cv::LINE_AA);
+                }
+            }
+        }
 
         // Our detection (green) mapped from frame coords into crop coords. The
         // overlay style depends on the mode: a square for ImageTemplate (the
