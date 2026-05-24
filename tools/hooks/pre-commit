@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Pre-commit: enforce the CI clang-format gate locally (build.yml `lint` /
+# tools/check.sh) so a style violation never reaches a pushed commit or a tag.
+# Runs only the fast format check; the heavier gates stay in tools/check.sh / CI.
+#
+# Enable in a clone:  git config core.hooksPath tools/hooks
+# Bypass once (rarely):  git commit --no-verify
+set -uo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+if ! command -v clang-format >/dev/null 2>&1; then
+    echo "pre-commit: clang-format not installed; skipping format check" >&2
+    exit 0
+fi
+
+if ! clang-format --dry-run --Werror src/*.cpp src/*.h; then
+    echo "" >&2
+    echo "pre-commit: clang-format violations above. Fix with:" >&2
+    echo "    clang-format -i src/*.cpp src/*.h" >&2
+    echo "then re-stage and commit (or bypass with --no-verify)." >&2
+    exit 1
+fi
