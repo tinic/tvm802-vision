@@ -20,13 +20,17 @@
 #include <cmath>
 #include <cstdio>
 #include <mutex>
+#include <string>
 #include <thread>
 
 namespace vis {
 namespace {
 
 const char* const kClassName = "MVisionSettingsWnd";
-const char* const kIniPath = "C:\\mvision_capture\\MVision_settings.txt";
+// MVision.ini in the working directory. Resolved to an ABSOLUTE path once at startup
+// (the host changes CWD via its file dialogs, so a relative path would drift between
+// load and save).
+std::string g_iniPath;
 
 enum : int { ID_TIMER = 1,
              HOTKEY_ID = 1,
@@ -287,7 +291,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             const int id = LOWORD(wParam);
             if (id == ID_BTN_SAVE) {
                 apply_from_controls();
-                save_settings(kIniPath);
+                save_settings(g_iniPath.c_str());
             } else if (id == ID_BTN_RESET) {
                 Settings def;  // all Auto / neutral
                 set_settings(def);
@@ -372,7 +376,10 @@ void ui_thread() {
 void start_settings_ui() {
     static std::once_flag once;
     std::call_once(once, [] {
-        load_settings(kIniPath);  // apply persisted settings before the first detect
+        char cwd[MAX_PATH] = {};
+        const DWORD n = GetCurrentDirectoryA(MAX_PATH, cwd);
+        g_iniPath = (n > 0 && n < MAX_PATH) ? std::string(cwd) + "\\MVision.ini" : "MVision.ini";
+        load_settings(g_iniPath.c_str());  // apply persisted settings before the first detect
         std::thread(ui_thread).detach();
     });
 }
