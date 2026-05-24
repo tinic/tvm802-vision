@@ -58,7 +58,7 @@ struct LiveStatus {
     bool found = false;
     double score = 0.0;  // detector quality (symmetry score / hough edge fraction / match)
     double radiusPx = 0.0;
-    double offXmm = 0.0, offYmm = 0.0;
+    double offXpx = 0.0, offYpx = 0.0;  // detection offset from the reference, raw pixels
 };
 LiveStatus get_status();
 void publish_status(const LiveStatus& st);

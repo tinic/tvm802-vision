@@ -1,7 +1,7 @@
 // settings_ui.cpp -- the classic Win32 settings dialog (the second part of the
 // module that touches the Windows API, alongside preview.cpp). A DLL-owned thread
 // registers a global hotkey (Ctrl+Alt+M) and serves a modeless dialog with
-// trackbars for the detection knobs (fiducial radius bracket, Round accept
+// trackbars for the detection knobs (fiducial diameter bracket, Round accept
 // threshold) and a grayscale image-adjustment set (gamma, brightness, contrast,
 // black/white levels, sharpen), plus a LIVE readout (active mode, LOCK/NO-LOCK,
 // score, radius, offset) fed by the detector. The dialog writes vis::Settings (which
@@ -11,6 +11,7 @@
 
 #include "settings_ui.h"
 
+#include "controller.h"
 #include "settings.h"
 
 #define NOMINMAX
@@ -71,11 +72,11 @@ struct SliderDef {
     int y;
 };
 
-// Layout (client 364 x 482). Group headers + the median checkbox are separate
+// Layout (client 420 x 482). Group headers + the median checkbox are separate
 // statics/buttons. Entries are in Idx order; the y values place them in two groups.
 const SliderDef kDefs[S_COUNT] = {
-    {"Radius min", 0, 120, K_PX, 46},          // S_RMIN
-    {"Radius max", 0, 120, K_PX, 71},          // S_RMAX
+    {"Diameter min", 0, 120, K_PX, 46},        // S_RMIN (slider is RADIUS px; shown as diameter)
+    {"Diameter max", 0, 120, K_PX, 71},        // S_RMAX (slider is RADIUS px; shown as diameter)
     {"Sensitivity", 0, 200, K_SENS, 96},       // S_SYM   (accept threshold, quadratic map)
     {"Gamma", 0, 40, K_GAMMA, 214},            // S_GAMMA (x10)
     {"Brightness", -128, 128, K_SINT, 239},    // S_BRI
@@ -178,10 +179,25 @@ int sens_val_to_pos(double val) {
     return p;
 }
 
+// Down-camera px->mm scale from the controller (0 if not yet available). Mean of the
+// anisotropic X/Y, for length/radius display; the live readout uses per-axis for offset.
+double down_scale_mean() {
+    const CamScale sc = down_cam_scale();
+    return sc.valid ? (sc.xMmPerPx + sc.yMmPerPx) * 0.5 : 0.0;
+}
+
 void format_value(Kind kind, int pos, char* buf, size_t n) {
     const double t = static_cast<double>(pos) / 10.0;
     switch (kind) {
-        case K_PX: pos <= 0 ? std::snprintf(buf, n, "Auto") : std::snprintf(buf, n, "%d px", pos); break;
+        case K_PX:  // radius slider, shown as DIAMETER (2x) to match the fiducial/host convention
+            if (pos <= 0) {
+                std::snprintf(buf, n, "Auto");
+            } else if (const double mm = down_scale_mean(); mm > 0.0) {
+                std::snprintf(buf, n, "%d px (%.2f mm)", pos * 2, pos * 2 * mm);
+            } else {
+                std::snprintf(buf, n, "%d px", pos * 2);
+            }
+            break;
         case K_THR: pos <= 0 ? std::snprintf(buf, n, "Auto") : std::snprintf(buf, n, "%.1f", t); break;
         case K_SENS: pos <= 0 ? std::snprintf(buf, n, "Auto") : std::snprintf(buf, n, "%.2f", sens_pos_to_val(pos)); break;
         case K_GAMMA: pos <= 0 ? std::snprintf(buf, n, "off") : std::snprintf(buf, n, "%.1f", t); break;
@@ -257,7 +273,7 @@ bool slider_applies(int mode, int idx) {
     switch (idx) {
         case S_SYM: return mode == MODE_ROUND;  // symmetry accept threshold: Round only
         case S_RMIN:
-        case S_RMAX: return mode == MODE_ROUND || mode == MODE_CIRCULAR;  // radius bracket
+        case S_RMAX: return mode == MODE_ROUND || mode == MODE_CIRCULAR;  // diameter bracket
         default: return true;                                             // exposure gate + all image adjustments: every mode
     }
 }
@@ -312,12 +328,24 @@ void refresh_status() {
     std::snprintf(m, sizeof m, "Active mode:  %s", mode);
     SetWindowTextA(g_lblMode, m);
 
-    char buf[160];
-    if (st.found)
-        std::snprintf(buf, sizeof buf, " LOCKED    score %.2f    r %.1f px    off %.2f, %.2f mm",
-                      st.score, st.radiusPx, st.offXmm, st.offYmm);
-    else
+    char buf[200];
+    if (st.found) {
+        const CamScale sc = down_cam_scale();
+        char r[40], o[64];
+        const double dpx = st.radiusPx * 2.0;  // detected diameter (radius x2)
+        if (sc.valid) {
+            const double mean = (sc.xMmPerPx + sc.yMmPerPx) * 0.5;
+            std::snprintf(r, sizeof r, "dia %.1f px (%.2f mm)", dpx, dpx * mean);
+            std::snprintf(o, sizeof o, "off %.1f, %.1f px (%.2f, %.2f mm)", st.offXpx, st.offYpx,
+                          st.offXpx * sc.xMmPerPx, st.offYpx * sc.yMmPerPx);
+        } else {
+            std::snprintf(r, sizeof r, "dia %.1f px", dpx);
+            std::snprintf(o, sizeof o, "off %.1f, %.1f px", st.offXpx, st.offYpx);
+        }
+        std::snprintf(buf, sizeof buf, " LOCKED    score %.2f    %s    %s", st.score, r, o);
+    } else {
         std::snprintf(buf, sizeof buf, " NO LOCK    score %.2f", st.score);
+    }
     SetWindowTextA(g_lblStatus, buf);
 
     g_lastFound = st.found;
@@ -332,7 +360,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             icc.dwICC = ICC_BAR_CLASSES;
             InitCommonControlsEx(&icc);
 
-            g_lblMode = make_static(hwnd, "Active mode:  (none yet)", 12, 8, 340, 18);
+            g_lblMode = make_static(hwnd, "Active mode:  (none yet)", 12, 8, 396, 18);
             make_static(hwnd, "- Detection -", 12, 28, 200, 16);
             make_static(hwnd, "- Image adjustments -", 12, 196, 240, 16);
 
@@ -343,7 +371,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                           106, kDefs[i].y, 176, 24, hwnd, nullptr, g_inst, nullptr);
                 SendMessageA(g_tb[i], TBM_SETRANGEMIN, FALSE, static_cast<LPARAM>(kDefs[i].lo));
                 SendMessageA(g_tb[i], TBM_SETRANGEMAX, TRUE, static_cast<LPARAM>(kDefs[i].hi));
-                g_lblVal[i] = make_static(hwnd, "Auto", 288, kDefs[i].y + 2, 70, 18);
+                g_lblVal[i] = make_static(hwnd, "Auto", 288, kDefs[i].y + 2, 124, 18);  // wide for "NN px (M.MM mm)"
             }
 
             g_chkMedian = CreateWindowExA(0, "BUTTON", "Median ring scoring (robust to glare)",
@@ -352,7 +380,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                           reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_CHK_MEDIAN)),
                                           g_inst, nullptr);
 
-            g_lblStatus = make_static(hwnd, " NO LOCK", 12, 394, 340, 42);
+            g_lblStatus = make_static(hwnd, " NO LOCK", 12, 394, 396, 42);
             make_button(hwnd, ID_BTN_SAVE, "Save", 60, 446, 80, 26);
             make_button(hwnd, ID_BTN_RESET, "Reset", 150, 446, 80, 26);
             make_button(hwnd, ID_BTN_CLOSE, "Close", 240, 446, 80, 26);
@@ -416,7 +444,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 void create_window() {
     const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
     const DWORD ex = WS_EX_TOPMOST | WS_EX_TOOLWINDOW;
-    RECT wr{0, 0, 364, 482};
+    RECT wr{0, 0, 420, 482};
     AdjustWindowRectEx(&wr, style, FALSE, ex);
     // Activate the v6 context around creation so this window AND the child controls
     // it makes in WM_CREATE render themed.

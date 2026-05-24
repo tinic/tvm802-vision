@@ -308,8 +308,8 @@ int run_mark_check(const void* f, int hwnd, const char* name, int logAlgo, int l
         st.found = mr.found;
         st.score = mr.quality;
         st.radiusPx = mr.radius;
-        st.offXmm = g_ourW;
-        st.offYmm = g_ourH;
+        st.offXpx = g_ourW * kScale;  // g_ourW is px/kScale; restore the raw pixel offset
+        st.offYpx = g_ourH * kScale;
         vis::publish_status(st);
     }
 
