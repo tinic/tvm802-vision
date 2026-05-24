@@ -82,18 +82,18 @@ With SurfaceMount **closed**: back up your `MVision.dll`, rename the original to
 ### Live settings dialog — press **Ctrl + Alt + M**
 
 While SurfaceMount is running (with a camera view active), the global hotkey
-**`Ctrl + Alt + M`** opens an on-screen settings panel — there's also a faint
-`Ctrl+Alt+M: settings` hint in the bottom-left of the preview. It lets you tune
+**`Ctrl + Alt + M`** opens an on-screen settings panel — there's also a small
+`Ctrl+Alt+M: settings` hint in the top-right of the preview. It lets you tune
 detection **on the machine, with no recompile and no file editing**, watching a
 **live readout** (active mode, `LOCKED` / `NO LOCK`, score, detected radius,
 offset) update as you drag — so you adjust until the marker turns green. The
 preview also shows the image adjustments live.
 
 - **Per mode.** Round, Circular, and ImageTemplate each have independent settings;
-  the panel automatically follows whichever mode is running. **Save** writes
-  `MVision.ini` in the app's working directory (reloaded on next launch); **Reset**
-  reverts the current mode. Everything starts at **Auto / neutral**, so nothing
-  changes until you move a control.
+  the panel automatically follows whichever mode is running, and controls that don't
+  affect that mode are greyed out. **Save** writes `MVision.ini` in the app's working
+  directory (reloaded on next launch); **Reset** reverts the current mode. Everything
+  starts at **Auto / neutral**, so nothing changes until you move a control.
 - **Detection:** fiducial **radius** bracket (min/max px), accept **sensitivity**
   (lower = more lenient), **exposure** gate (min/max frame brightness), and — for
   Round — **median ring scoring** (more robust to glare).
