@@ -16,12 +16,15 @@
 #include "originals.h"
 #include "capture.h"
 #include "vision.h"
+#include "settings.h"
+#include "settings_ui.h"
 
 #include <cstdio>
 #include <cstring>
 #include <chrono>
 #include <functional>
 #include <limits>
+#include <mutex>
 #include <thread>
 
 // Lightweight timing to locate the frame-rate bottleneck (QueryFrame vs our
@@ -277,10 +280,16 @@ void maybe_log_comp(const void* frame, const vis::CompResult& cr) {
 // `detect` (only while capture is armed, to avoid adding latency in production). Its
 // result is logged for offline comparison but NEVER drives placement. Used to vet a
 // candidate detector (circular-symmetry) on live frames before it takes over.
+std::once_flag g_uiOnce;
+
 template <class Detect, class OrigRender>
 int run_mark_check(const void* f, int hwnd, const char* name, int logAlgo, int logRange,
                    Detect&& detect, OrigRender&& origRender,
                    const std::function<vis::MarkResult(double, double, int)>& shadow = {}) {
+    // Start the settings UI on first down-vision check (never in DllMain -> no loader
+    // lock). Idempotent; the UI is inert until the operator presses the hotkey.
+    std::call_once(g_uiOnce, [] { vis::start_settings_ui(); });
+
     double refX = 0.0, refY = 0.0;
     reference_point(f, &refX, &refY);
     const int searchR = (g_areaMin > kAreaMinPx && g_areaMin < kAreaMaxPx)
@@ -292,6 +301,21 @@ int run_mark_check(const void* f, int hwnd, const char* name, int logAlgo, int l
     g_detMs = ms_since(t0);
 
     set_our_result(mr);  // our offset drives placement
+
+    // Publish the live readout for the settings UI (mode, lock, score, radius, offset).
+    {
+        vis::LiveStatus st;
+        st.mode = (std::strcmp(name, "CheckMark") == 0)       ? 1
+                  : (std::strcmp(name, "CheckMark2") == 0)    ? 2
+                  : (std::strcmp(name, "CheckTemplate") == 0) ? 3
+                                                              : 0;
+        st.found = mr.found;
+        st.score = mr.quality;
+        st.radiusPx = mr.radius;
+        st.offXmm = g_ourW;
+        st.offYmm = g_ourH;
+        vis::publish_status(st);
+    }
 
     // Read-only shadow comparison (logged only; never drives). Gated on armed so it
     // costs nothing in production.

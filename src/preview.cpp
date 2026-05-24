@@ -103,6 +103,16 @@ bool render_preview(const void* frame, void* hwndV, double mvoX, double mvoY,
             cv::drawMarker(work, cv::Point(u, v), green, cv::MARKER_CROSS, 14, 2);
         }
 
+        // Discoverability hint for the settings dialog (black outline + light text so
+        // it reads on any background). Bottom-left of the crop.
+        {
+            const cv::Point at(6, ch - 8);
+            cv::putText(work, "Ctrl+Alt+M: settings", at, cv::FONT_HERSHEY_SIMPLEX, 0.4,
+                        cv::Scalar(0, 0, 0), 2, cv::LINE_AA);
+            cv::putText(work, "Ctrl+Alt+M: settings", at, cv::FONT_HERSHEY_SIMPLEX, 0.4,
+                        cv::Scalar(210, 210, 210), 1, cv::LINE_AA);
+        }
+
         if (!work.isContinuous()) work = work.clone();
     } catch (...) {
         return false;  // never let an OpenCV failure reach the host

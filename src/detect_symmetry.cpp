@@ -1,6 +1,7 @@
 #include "detect_symmetry.h"
 
 #include "detect_common.h"
+#include "settings.h"
 
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
@@ -55,7 +56,7 @@ inline double bilin(const uchar* data, ptrdiff_t step, double x, double y) {
 // space (detect_with_fields applies the +-0.5 correction).
 MarkResult detect_one_field_csym(const cv::Mat& gFull, const CircularSymmetry& sym,
                                  double refX, double refY, int searchRadiusPx,
-                                 double maxR, double minSym) {
+                                 double maxR, double minSym, const Settings& adj) {
     MarkResult r;
     const double rxF = (refX >= 0.0) ? refX : gFull.cols / 2.0;
     const double ryF = (refY >= 0.0) ? refY : gFull.rows / 2.0;
@@ -76,6 +77,7 @@ MarkResult detect_one_field_csym(const cv::Mat& gFull, const CircularSymmetry& s
 
     cv::Mat g;
     cv::GaussianBlur(sub, g, cv::Size(kCsym.gaussKernel, kCsym.gaussKernel), 1.0);
+    apply_image_adjustments(g, adj);  // optional UI image adjustments (no-op when neutral)
     const double cxRef = rxF - crop.x, cyRef = ryF - crop.y;
     const double sr2 = static_cast<double>(sr) * sr;
 
@@ -228,11 +230,18 @@ double CircularSymmetry::score(const cv::Mat& g, double cx, double cy, double& e
 // un-softened woven edges the contour detector relies on).
 MarkResult detect_circular_symmetry(const void* frame, double refX, double refY,
                                     int searchRadiusPx, int minDiaPx, int maxDiaPx) {
-    const double minR = (minDiaPx > 0) ? minDiaPx / 2.0 : static_cast<double>(kCsym.minRadiusPx);
-    const double maxR = (maxDiaPx > 0) ? maxDiaPx / 2.0 : static_cast<double>(kCsym.maxRadiusPx);
+    // Precedence: UI/settings override > caller's diameter hint > built-in default.
+    const Settings cfg = get_settings();
+    const double minR = cfg.radiusMinPx > 0.0 ? cfg.radiusMinPx
+                        : (minDiaPx > 0)      ? minDiaPx / 2.0
+                                              : static_cast<double>(kCsym.minRadiusPx);
+    const double maxR = cfg.radiusMaxPx > 0.0 ? cfg.radiusMaxPx
+                        : (maxDiaPx > 0)      ? maxDiaPx / 2.0
+                                              : static_cast<double>(kCsym.maxRadiusPx);
+    const double minSym = cfg.minSymmetry > 0.0 ? cfg.minSymmetry : kCsym.minSymmetry;
     const CircularSymmetry sym(minR, maxR, kCsym.ringStep);
     MarkResult r = detect_with_fields(frame, [&](const cv::Mat& g) {
-        return detect_one_field_csym(g, sym, refX, refY, searchRadiusPx, maxR, kCsym.minSymmetry);
+        return detect_one_field_csym(g, sym, refX, refY, searchRadiusPx, maxR, minSym, cfg);
     });
     r.shape = MarkShape::Circle;
     return r;

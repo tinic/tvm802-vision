@@ -1,0 +1,51 @@
+#pragma once
+// Runtime-tunable detector settings + live detection status, shared between the
+// detectors (which READ settings and the shim which PUBLISHES status) and the Win32
+// settings UI (which writes settings and reads status). Windows-free and OpenCV-free
+// so it links into the portable detector core and the off-target test harness.
+
+namespace vis {
+
+// Detector overrides. A field <= 0 means "use the detector's built-in default", so a
+// default-constructed Settings leaves behavior EXACTLY as shipped -- the UI only
+// deviates when the operator drags a slider off its "Auto" position.
+struct Settings {
+    // Detection (apply to both down-vision detectors).
+    double radiusMinPx = 0.0;  // fiducial ring radius bracket (Round + Circular)
+    double radiusMaxPx = 0.0;
+    double minSymmetry = 0.0;  // Round (circular-symmetry) accept threshold; lower = more lenient
+
+    // Image adjustments -- a grayscale subset of the png2amiga preprocess set,
+    // applied to the ROI before detection. Every field is a no-op at its neutral
+    // value, so a default Settings leaves the image untouched. (Saturation/hue are
+    // color-only and omitted -- our frames are monochrome.)
+    double gamma = 0.0;       // 0 = off (1.0); <1 lifts shadows, >1 boosts highlights
+    double brightness = 0.0;  // 8-bit add, 0 = off (-128..+128)
+    double contrast = 0.0;    // 0 = off (1.0); multiply about mid-gray
+    double blackPoint = 0.0;  // 8-bit levels low clip, 0 = off
+    double whitePoint = 0.0;  // 8-bit levels high clip, 0 = off
+    double sharpen = 0.0;     // 0 = off; >0 unsharp, <0 blur (-1..+1)
+};
+
+// Thread-safe snapshot / update (the UI thread writes; detector threads read).
+Settings get_settings();
+void set_settings(const Settings& s);
+
+// Persistence: a trivial "key=value" text file. load is a no-op if the file is
+// absent or unreadable, so a fresh install runs on built-in defaults.
+void load_settings(const char* path);
+void save_settings(const char* path);
+
+// Live detection status the shim publishes each frame for the UI's readout.
+// mode: 0 none, 1 Round (CheckMark), 2 Circular (CheckMark2), 3 Template.
+struct LiveStatus {
+    int mode = 0;
+    bool found = false;
+    double score = 0.0;  // detector quality (symmetry score / hough edge fraction / match)
+    double radiusPx = 0.0;
+    double offXmm = 0.0, offYmm = 0.0;
+};
+LiveStatus get_status();
+void publish_status(const LiveStatus& st);
+
+}  // namespace vis

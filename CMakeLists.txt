@@ -74,6 +74,8 @@ if(_build_dll)
         src/detect_template.cpp
         src/detect_symmetry.cpp
         src/detect_component.cpp
+        src/settings.cpp
+        src/settings_ui.cpp
         src/preview.cpp
     )
 
@@ -90,7 +92,7 @@ if(_build_dll)
             OUTPUT_NAME "${output_name}" PREFIX "" SUFFIX ".dll")
         target_include_directories(${target} PRIVATE src)
         # gdi32: preview.cpp uses GDI (StretchDIBits, GetStockObject, ...).
-        target_link_libraries(${target} PRIVATE ${OpenCV_LIBS} Threads::Threads kernel32 user32 gdi32)
+        target_link_libraries(${target} PRIVATE ${OpenCV_LIBS} Threads::Threads kernel32 user32 gdi32 comctl32)
         target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS)
         target_compile_options(${target} PRIVATE ${MVISION_WARNINGS})
         if(MSVC)
@@ -123,7 +125,8 @@ if(BUILD_TESTS)
         src/detect_contour.cpp
         src/detect_template.cpp
         src/detect_symmetry.cpp
-        src/detect_component.cpp)
+        src/detect_component.cpp
+        src/settings.cpp)
     target_include_directories(mvision_detect_test PRIVATE src)
     target_link_libraries(mvision_detect_test PRIVATE ${OpenCV_LIBS} Threads::Threads)
     target_compile_definitions(mvision_detect_test PRIVATE _CRT_SECURE_NO_WARNINGS)

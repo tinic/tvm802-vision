@@ -21,4 +21,13 @@ MarkResult detect_with_fields(const void* frame,
                               const std::function<MarkResult(const cv::Mat&)>& perField,
                               bool wovenWhenSettled = false);
 
+struct Settings;  // settings.h
+
+// Apply the image adjustments (gamma / levels / brightness / contrast / sharpen)
+// in place to a single-channel 8U ROI before detection. The four point ops compose
+// into ONE 256-entry LUT (one pass); sharpen/blur is a 3x3 spatial op after. Every
+// field is a no-op at its neutral value, so a default Settings leaves `g` untouched.
+// A grayscale subset of the png2amiga preprocess pipeline.
+void apply_image_adjustments(cv::Mat& g, const Settings& s);
+
 }  // namespace vis

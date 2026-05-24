@@ -1,6 +1,7 @@
 #include "vision.h"
 
 #include "detect_common.h"
+#include "settings.h"
 
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
@@ -48,7 +49,8 @@ constexpr CircleParams kCircle;
 // uses the contour detector, never Hough. cx in full-frame x; cy in field-row space
 // (caller applies the +-0.5 field correction). Returns found=false on no mark.
 static MarkResult detect_one_field_circle(const cv::Mat& gFull, int minRfull, int maxRfull,
-                                          double refX, double refY, int searchRadiusPx) {
+                                          double refX, double refY, int searchRadiusPx,
+                                          const Settings& adj) {
     MarkResult r;
 
     // Restrict the WHOLE pipeline to a ROI around the reference. The mark is
@@ -66,7 +68,8 @@ static MarkResult detect_one_field_circle(const cv::Mat& gFull, int minRfull, in
         const int slack = 2 * minRfull + kCircle.roiMinSlackPx;
         if (c.width >= slack && c.height >= slack) crop = c;
     }
-    const cv::Mat g = gFull(crop);
+    cv::Mat g = gFull(crop).clone();                          // owned copy; adjustments must not touch the source
+    apply_image_adjustments(g, adj);                          // optional UI image adjustments (no-op when neutral)
     const double cxRef = rxF - crop.x, cyRef = ryF - crop.y;  // reference in crop coords
 
     const double imgMean = cv::mean(g)[0];
@@ -203,7 +206,13 @@ static MarkResult detect_one_field(const cv::Mat& gFull, int markSizePx,
         minRfull = kCircle.radiusFallbackMin;
         maxRfull = kCircle.radiusFallbackMax;
     }
-    return detect_one_field_circle(gFull, minRfull, maxRfull, refX, refY, searchRadiusPx);
+    // Settings override (the settings UI's radius bracket replaces the size-derived
+    // one, so a user whose px/mm or fiducial size differs can fix detection live).
+    const Settings cfg = get_settings();
+    if (cfg.radiusMinPx > 0.0) minRfull = static_cast<int>(cfg.radiusMinPx);
+    if (cfg.radiusMaxPx > 0.0) maxRfull = static_cast<int>(cfg.radiusMaxPx);
+    if (maxRfull <= minRfull) maxRfull = minRfull + 1;  // guard against an inverted bracket
+    return detect_one_field_circle(gFull, minRfull, maxRfull, refX, refY, searchRadiusPx, cfg);
 }
 
 MarkResult detect_circle_mark(const void* frame, int markSizePx,
