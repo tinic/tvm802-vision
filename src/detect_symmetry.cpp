@@ -30,6 +30,10 @@ struct CsymParams {
     int ringStep = 1;          // radius sampling step
     double minSymmetry = 3.5;  // accept score (overallVar / area-weighted mean ring var);
                                // live data: real fiducial >=4.6, blown-frame false +ve 2.85
+    // Median-combine guards (Round, optional median ring scoring). Without these a
+    // black area bordering a bright edge divides a large variance by a ~0 median.
+    double medianMeanFrac = 0.5;  // median denom floored at this x the mean within-ring var
+    double minDenomVar = 2.0;     // absolute denominator noise floor (was 1e-6 -> blow-up)
     int coarseStep = 4;        // center grid: coarse pass (fine pass refines +-fineSpan)
     int fineSpan = 3;          // +-span around the coarse winner at 1px (>= coarseStep/2)
     int coarseSampleStep = 2;  // ring/point subsample for the coarse pass (4x cheaper)
@@ -232,15 +236,25 @@ double CircularSymmetry::score(const cv::Mat& g, double cx, double cy, double& e
     // Combine the per-ring variances. MEDIAN ignores a few glare-corrupted rings
     // (their high variance) that would otherwise inflate the mean and sink the
     // score; the default area-weighted mean is cheaper and slightly steadier.
-    double avgRingVar;
+    const double meanRingVar = wRingVar / wSum;  // area-weighted mean within-ring variance
+    double avgRingVar = meanRingVar;
     if (median && nRingVar > 0) {
         const int mid = nRingVar / 2;
         std::nth_element(ringVars, ringVars + mid, ringVars + nRingVar);
-        avgRingVar = static_cast<double>(ringVars[mid]);
-    } else {
-        avgRingVar = wRingVar / wSum;
+        const double med = static_cast<double>(ringVars[mid]);
+        // The median rescues a genuine fiducial whose mean within-ring variance is
+        // inflated by a few glare rings. But it must NOT collapse toward zero over a
+        // flat black area that borders a bright edge: there most rings are flat (var
+        // ~0 -> median ~0) while a few edge rings carry huge variance, and the median
+        // throws away exactly the rings that prove the feature is ASYMMETRIC -> the
+        // score explodes (the mean-path score correctly stays low there). So bound the
+        // boost: the denominator may not drop below a fraction of the mean within-ring
+        // variance. This caps the median score at ~1/frac x the robust mean score, so
+        // a straight edge stays correctly rejected while real glare is still rescued.
+        const double lo = meanRingVar * kCsym.medianMeanFrac;
+        avgRingVar = med > lo ? med : lo;
     }
-    if (avgRingVar < 1e-6) avgRingVar = 1e-6;
+    if (avgRingVar < kCsym.minDenomVar) avgRingVar = kCsym.minDenomVar;  // noise floor, not 1e-6
     return overallVar / avgRingVar;
 }
 

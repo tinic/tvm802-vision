@@ -158,6 +158,52 @@ int inverted_bracket_check() {
     return 0;
 }
 
+// Regression: with median ring scoring ON, a flat dark area that borders a bright
+// edge once divided a large overall variance by a ~0 median ring variance (most
+// rings flat -> median ~0, a few edge rings huge) -> a phantom score in the millions
+// -> a false circle "detected" in black. The median denominator must stay bounded
+// (>= a fraction of the mean ring variance, plus a noise floor), so the region reads
+// not-found -- while a genuine fiducial still detects under median scoring.
+int median_blackedge_check() {
+    int rc = 0;
+    vis::Settings med;  // median ring scoring on, defaults otherwise
+    med.medianRings = 1.0;
+    vis::set_settings(vis::MODE_ROUND, med);
+
+    // (a) dark pedestal (passes the exposure gate) + bright right half; the search is
+    //     centered in the dark side, so candidates have flat inner rings.
+    {
+        cv::Mat img(480, 640, CV_8UC1, cv::Scalar(18));
+        img(cv::Rect(335, 0, 640 - 335, 480)).setTo(200);
+        IplImage ipl = make_ipl(img);
+        vis::MarkResult r = vis::detect_circular_symmetry(&ipl, 315.0, 240.0, 45);
+        std::printf("black+edge: found=%d quality=%.2f\n", r.found ? 1 : 0, r.quality);
+        if (r.found) {
+            std::printf("FAIL: median scoring detected a circle in a black area\n");
+            rc = 1;
+        } else {
+            std::printf("PASS: no false circle in the black area\n");
+        }
+    }
+    // (b) a genuine fiducial must still detect with median scoring on.
+    {
+        cv::Mat img(480, 640, CV_8UC1, cv::Scalar(45));
+        cv::circle(img, cv::Point(322, 241), 14, cv::Scalar(225), -1, cv::LINE_AA);
+        IplImage ipl = make_ipl(img);
+        vis::MarkResult r = vis::detect_circular_symmetry(&ipl, 320.0, 240.0, 60);
+        std::printf("median fiducial: found=%d quality=%.2f cx=%.1f cy=%.1f\n",
+                    r.found ? 1 : 0, r.quality, r.cx, r.cy);
+        if (!r.found) {
+            std::printf("FAIL: median scoring lost a real fiducial\n");
+            rc = 1;
+        } else {
+            std::printf("PASS: real fiducial still detected under median scoring\n");
+        }
+    }
+    vis::set_settings(vis::MODE_ROUND, vis::Settings{});  // restore defaults
+    return rc;
+}
+
 int run_over_files(int n, char** paths) {
     std::printf("file,found,cx,cy,radius,quality\n");
     int rc = 0;
@@ -183,5 +229,5 @@ int run_over_files(int n, char** paths) {
 int main(int argc, char** argv) {
     if (argc > 1) return run_over_files(argc - 1, argv + 1);
     const int rc = synthetic_self_check();
-    return rc | synthetic_comp_check() | inverted_bracket_check();
+    return rc | synthetic_comp_check() | inverted_bracket_check() | median_blackedge_check();
 }
