@@ -73,10 +73,14 @@ MarkResult detect_one_field_csym(const cv::Mat& gFull, const CircularSymmetry& s
     }
     const cv::Mat sub = gFull(crop);
     const double meanv = cv::mean(sub)[0];
-    if (meanv < kCsym.meanLo || meanv > kCsym.meanHi) return r;  // dropped / blown
+    const double meanLo = adj.meanLo > 0.0 ? adj.meanLo : kCsym.meanLo;
+    const double meanHi = adj.meanHi > 0.0 ? adj.meanHi : kCsym.meanHi;
+    if (meanv < meanLo || meanv > meanHi) return r;  // dropped / blown
 
+    const bool median = adj.medianRings > 0.5;
+    const int gk = blur_kernel(adj.blur, kCsym.gaussKernel);
     cv::Mat g;
-    cv::GaussianBlur(sub, g, cv::Size(kCsym.gaussKernel, kCsym.gaussKernel), 1.0);
+    cv::GaussianBlur(sub, g, cv::Size(gk, gk), 1.0);
     apply_image_adjustments(g, adj);  // optional UI image adjustments (no-op when neutral)
     const double cxRef = rxF - crop.x, cyRef = ryF - crop.y;
     const double sr2 = static_cast<double>(sr) * sr;
@@ -102,7 +106,7 @@ MarkResult detect_one_field_csym(const cv::Mat& gFull, const CircularSymmetry& s
             const double dx = x - cxRef, dy = y - cyRef;
             if (dx * dx + dy * dy > sr2) continue;
             double e = 0.0;
-            const double s = sym.score(g, x, y, e, sstep);
+            const double s = sym.score(g, x, y, e, sstep, median);
             if (s > c0.s) {
                 c0.s = s;
                 c0.x = x;
@@ -123,7 +127,7 @@ MarkResult detect_one_field_csym(const cv::Mat& gFull, const CircularSymmetry& s
             const double dx = x - cxRef, dy = y - cyRef;
             if (dx * dx + dy * dy > sr2) continue;
             double e = 0.0;
-            const double s = sym.score(g, x, y, e, 1);
+            const double s = sym.score(g, x, y, e, 1, median);
             if (s > c1.s) {
                 c1.s = s;
                 c1.x = x;
@@ -137,10 +141,10 @@ MarkResult detect_one_field_csym(const cv::Mat& gFull, const CircularSymmetry& s
     // Sub-pixel: parabolic fit on the score surface around the 1px winner (4 extra
     // full-density evals, not an N x N sub-grid scan).
     double et = 0.0;
-    const double sL = sym.score(g, c1.x - 1.0, c1.y, et, 1);
-    const double sR = sym.score(g, c1.x + 1.0, c1.y, et, 1);
-    const double sU = sym.score(g, c1.x, c1.y - 1.0, et, 1);
-    const double sD = sym.score(g, c1.x, c1.y + 1.0, et, 1);
+    const double sL = sym.score(g, c1.x - 1.0, c1.y, et, 1, median);
+    const double sR = sym.score(g, c1.x + 1.0, c1.y, et, 1, median);
+    const double sU = sym.score(g, c1.x, c1.y - 1.0, et, 1, median);
+    const double sD = sym.score(g, c1.x, c1.y + 1.0, et, 1, median);
     double dx = 0.0, dy = 0.0;
     const double denx = sL - 2.0 * c1.s + sR;
     const double deny = sU - 2.0 * c1.s + sD;
@@ -181,11 +185,14 @@ CircularSymmetry::CircularSymmetry(double minRadiusPx, double maxRadiusPx, int r
 
 // Trig-free: walks the precomputed ring offsets (built once in the constructor).
 // step>1 subsamples rings and points (coarse pass); step=1 is full (fine pass).
-double CircularSymmetry::score(const cv::Mat& g, double cx, double cy, double& edgeR, int step) const {
+double CircularSymmetry::score(const cv::Mat& g, double cx, double cy, double& edgeR, int step,
+                               bool median) const {
     double sumAll = 0.0, sumAll2 = 0.0;
     int nAll = 0;
     double wRingVar = 0.0, wSum = 0.0, maxRingVar = -1.0;
     edgeR = 0.0;
+    float ringVars[256];  // per-ring variances, for the median combine
+    int nRingVar = 0;
     const double wlim = g.cols - 1.0, hlim = g.rows - 1.0;
     const uchar* data = g.ptr<uchar>(0);                        // row pointer/stride computed ONCE here,
     const ptrdiff_t gstep = static_cast<ptrdiff_t>(g.step[0]);  // not cv::Mat::ptr() per sample
@@ -212,6 +219,7 @@ double CircularSymmetry::score(const cv::Mat& g, double cx, double cy, double& e
         if (var < 0.0) var = 0.0;
         wRingVar += cnt * var;
         wSum += cnt;
+        if (median && nRingVar < 256) ringVars[nRingVar++] = static_cast<float>(var);
         if (var > maxRingVar) {
             maxRingVar = var;
             edgeR = ringR_[static_cast<size_t>(ri)];
@@ -221,7 +229,17 @@ double CircularSymmetry::score(const cv::Mat& g, double cx, double cy, double& e
     const double meanAll = sumAll / static_cast<double>(nAll);
     double overallVar = sumAll2 / static_cast<double>(nAll) - meanAll * meanAll;
     if (overallVar < 0.0) overallVar = 0.0;
-    double avgRingVar = wRingVar / wSum;
+    // Combine the per-ring variances. MEDIAN ignores a few glare-corrupted rings
+    // (their high variance) that would otherwise inflate the mean and sink the
+    // score; the default area-weighted mean is cheaper and slightly steadier.
+    double avgRingVar;
+    if (median && nRingVar > 0) {
+        const int mid = nRingVar / 2;
+        std::nth_element(ringVars, ringVars + mid, ringVars + nRingVar);
+        avgRingVar = static_cast<double>(ringVars[mid]);
+    } else {
+        avgRingVar = wRingVar / wSum;
+    }
     if (avgRingVar < 1e-6) avgRingVar = 1e-6;
     return overallVar / avgRingVar;
 }

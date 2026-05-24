@@ -25,6 +25,12 @@ struct Settings {
     double blackPoint = 0.0;  // 8-bit levels low clip, 0 = off
     double whitePoint = 0.0;  // 8-bit levels high clip, 0 = off
     double sharpen = 0.0;     // 0 = off; >0 unsharp, <0 blur (-1..+1)
+    double blur = 0.0;        // detector pre-blur Gaussian kernel px; 0 = Auto (per-mode default), else odd 3..25
+
+    // Detection gates / scoring.
+    double meanLo = 0.0;       // exposure gate: reject frame mean below this; 0 = Auto (default 6)
+    double meanHi = 0.0;       // exposure gate: reject frame mean above this; 0 = Auto (default 250)
+    double medianRings = 0.0;  // Round: combine rings by MEDIAN (robust to glare) instead of mean; 0 = off, 1 = on
 };
 
 // Mark modes (match LiveStatus.mode). Settings are kept PER MODE, so Round /

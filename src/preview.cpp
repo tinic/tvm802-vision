@@ -54,7 +54,12 @@ bool render_preview(const void* frame, void* hwndV, double mvoX, double mvoY,
             cv::extractChannel(img, gray, 0);  // mono capture: plane 0 == gray
         else
             return false;
-        apply_image_adjustments(gray, get_settings(get_status().mode));  // active mode's adjustments
+        const Settings pcfg = get_settings(get_status().mode);  // active mode's adjustments
+        apply_image_adjustments(gray, pcfg);
+        if (pcfg.blur > 0.0) {  // show an EXPLICIT pre-blur (Auto = detector default, not shown)
+            const int gk = blur_kernel(pcfg.blur, 5);
+            cv::GaussianBlur(gray, gray, cv::Size(gk, gk), 0);
+        }
         cv::Mat bgr;
         cv::cvtColor(gray, bgr, cv::COLOR_GRAY2BGR);
 

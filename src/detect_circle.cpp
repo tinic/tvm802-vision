@@ -73,7 +73,9 @@ static MarkResult detect_one_field_circle(const cv::Mat& gFull, int minRfull, in
     const double cxRef = rxF - crop.x, cyRef = ryF - crop.y;  // reference in crop coords
 
     const double imgMean = cv::mean(g)[0];
-    if (imgMean < kCircle.meanLo || imgMean > kCircle.meanHi) return r;  // dropped/blown
+    const double meanLo = adj.meanLo > 0.0 ? adj.meanLo : kCircle.meanLo;
+    const double meanHi = adj.meanHi > 0.0 ? adj.meanHi : kCircle.meanHi;
+    if (imgMean < meanLo || imgMean > meanHi) return r;  // dropped/blown
 
     // Denoise -> illumination normalize -> light smooth. Denoise BEFORE CLAHE
     // (CLAHE amplifies noise). medianBlur kills analog impulse pixels; the
@@ -83,7 +85,8 @@ static MarkResult detect_one_field_circle(const cv::Mat& gFull, int minRfull, in
     cv::medianBlur(g, med, 3);
     cv::bilateralFilter(med, den, /*d*/ 5, /*sigmaColor*/ 25, /*sigmaSpace*/ 25);
     cv::createCLAHE(3.0, cv::Size(8, 8))->apply(den, norm);
-    cv::GaussianBlur(norm, det, cv::Size(3, 3), 1.0);
+    const int gk = blur_kernel(adj.blur, 3);
+    cv::GaussianBlur(norm, det, cv::Size(gk, gk), 1.0);
 
     std::vector<cv::Vec3f> circles;
     cv::HoughCircles(det, circles, cv::HOUGH_GRADIENT, kCircle.houghDp,

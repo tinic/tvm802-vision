@@ -36,7 +36,8 @@ enum : int { ID_TIMER = 1,
              HOTKEY_ID = 1,
              ID_BTN_SAVE = 1100,
              ID_BTN_RESET = 1101,
-             ID_BTN_CLOSE = 1102 };
+             ID_BTN_CLOSE = 1102,
+             ID_CHK_MEDIAN = 1103 };
 
 // One slider per tunable. `kind` drives both the value-label format and the
 // Settings <-> trackbar mapping.
@@ -45,7 +46,9 @@ enum Kind { K_PX,
             K_GAMMA,
             K_SINT,
             K_INT,
-            K_STENTHS };
+            K_STENTHS,
+            K_AUTOINT,  // 0 = "Auto", else integer
+            K_BLUR };   // 0 = "Auto", else odd kernel "NN px"
 enum Idx { S_RMIN,
            S_RMAX,
            S_SYM,
@@ -55,6 +58,9 @@ enum Idx { S_RMIN,
            S_BLK,
            S_WHT,
            S_SHP,
+           S_EXPLO,
+           S_EXPHI,
+           S_BLUR,
            S_COUNT };
 
 struct SliderDef {
@@ -64,17 +70,21 @@ struct SliderDef {
     int y;
 };
 
-// Layout (client 364 x 396). Group headers are drawn as separate statics.
+// Layout (client 364 x 482). Group headers + the median checkbox are separate
+// statics/buttons. Entries are in Idx order; the y values place them in two groups.
 const SliderDef kDefs[S_COUNT] = {
-    {"Radius min", 0, 120, K_PX, 48},        // S_RMIN
-    {"Radius max", 0, 120, K_PX, 74},        // S_RMAX
-    {"Sensitivity", 0, 100, K_THR, 100},     // S_SYM  (accept threshold x10)
-    {"Gamma", 0, 40, K_GAMMA, 146},          // S_GAMMA (x10)
-    {"Brightness", -128, 128, K_SINT, 172},  // S_BRI
-    {"Contrast", 0, 30, K_THR, 198},         // S_CON  (x10)
-    {"Black point", 0, 128, K_INT, 224},     // S_BLK
-    {"White point", 0, 128, K_INT, 250},     // S_WHT
-    {"Sharpen", -10, 10, K_STENTHS, 276},    // S_SHP  (x10)
+    {"Radius min", 0, 120, K_PX, 46},          // S_RMIN
+    {"Radius max", 0, 120, K_PX, 71},          // S_RMAX
+    {"Sensitivity", 0, 100, K_THR, 96},        // S_SYM   (accept threshold x10)
+    {"Gamma", 0, 40, K_GAMMA, 214},            // S_GAMMA (x10)
+    {"Brightness", -128, 128, K_SINT, 239},    // S_BRI
+    {"Contrast", 0, 30, K_THR, 264},           // S_CON   (x10)
+    {"Black point", 0, 128, K_INT, 289},       // S_BLK
+    {"White point", 0, 128, K_INT, 314},       // S_WHT
+    {"Sharpen", -10, 10, K_STENTHS, 339},      // S_SHP   (x10)
+    {"Exposure min", 0, 128, K_AUTOINT, 121},  // S_EXPLO (frame-mean gate low)
+    {"Exposure max", 0, 255, K_AUTOINT, 146},  // S_EXPHI (frame-mean gate high)
+    {"Blur", 0, 25, K_BLUR, 364},              // S_BLUR  (pre-blur kernel px)
 };
 
 HINSTANCE g_inst = nullptr;
@@ -82,6 +92,7 @@ HWND g_win = nullptr;
 HWND g_lblMode = nullptr, g_lblStatus = nullptr;
 HWND g_tb[S_COUNT] = {};
 HWND g_lblVal[S_COUNT] = {};
+HWND g_chkMedian = nullptr;
 HBRUSH g_brGreen = nullptr, g_brRed = nullptr;
 bool g_lastFound = false;
 int g_curMode = MODE_ROUND;              // which mode's settings the sliders currently edit
@@ -152,6 +163,17 @@ void format_value(Kind kind, int pos, char* buf, size_t n) {
         case K_SINT: pos == 0 ? std::snprintf(buf, n, "0") : std::snprintf(buf, n, "%+d", pos); break;
         case K_INT: pos <= 0 ? std::snprintf(buf, n, "0") : std::snprintf(buf, n, "%d", pos); break;
         case K_STENTHS: pos == 0 ? std::snprintf(buf, n, "0") : std::snprintf(buf, n, "%+.1f", t); break;
+        case K_AUTOINT: pos <= 0 ? std::snprintf(buf, n, "Auto") : std::snprintf(buf, n, "%d", pos); break;
+        case K_BLUR: {
+            if (pos <= 0) {
+                std::snprintf(buf, n, "Auto");
+            } else {
+                int k = pos < 3 ? 3 : (pos > 25 ? 25 : pos);
+                if ((k & 1) == 0) ++k;  // shown as the odd kernel the detector will use
+                std::snprintf(buf, n, "%d px", k);
+            }
+            break;
+        }
     }
 }
 
@@ -173,7 +195,10 @@ double map_to_setting(Idx i, int pos) {
         case S_RMIN:
         case S_RMAX:
         case S_BLK:
-        case S_WHT: return pos > 0 ? static_cast<double>(pos) : 0.0;
+        case S_WHT:
+        case S_EXPLO:
+        case S_EXPHI:
+        case S_BLUR: return pos > 0 ? static_cast<double>(pos) : 0.0;
         case S_BRI: return static_cast<double>(pos);  // signed, 0 = off
         case S_SYM:
         case S_GAMMA:
@@ -194,6 +219,10 @@ void apply_from_controls() {
     s.blackPoint = map_to_setting(S_BLK, tb_pos(S_BLK));
     s.whitePoint = map_to_setting(S_WHT, tb_pos(S_WHT));
     s.sharpen = map_to_setting(S_SHP, tb_pos(S_SHP));
+    s.meanLo = map_to_setting(S_EXPLO, tb_pos(S_EXPLO));
+    s.meanHi = map_to_setting(S_EXPHI, tb_pos(S_EXPHI));
+    s.blur = map_to_setting(S_BLUR, tb_pos(S_BLUR));
+    s.medianRings = (SendMessageA(g_chkMedian, BM_GETCHECK, 0, 0) == BST_CHECKED) ? 1.0 : 0.0;
     set_settings(g_curMode, s);
     refresh_value_labels();
 }
@@ -210,8 +239,12 @@ void controls_from_settings() {
     pos[S_BLK] = static_cast<int>(std::lround(s.blackPoint));
     pos[S_WHT] = static_cast<int>(std::lround(s.whitePoint));
     pos[S_SHP] = static_cast<int>(std::lround(s.sharpen * 10.0));
+    pos[S_EXPLO] = static_cast<int>(std::lround(s.meanLo));
+    pos[S_EXPHI] = static_cast<int>(std::lround(s.meanHi));
+    pos[S_BLUR] = static_cast<int>(std::lround(s.blur));
     for (int i = 0; i < S_COUNT; ++i)
         SendMessageA(g_tb[i], TBM_SETPOS, TRUE, static_cast<LPARAM>(pos[i]));
+    SendMessageA(g_chkMedian, BM_SETCHECK, s.medianRings > 0.5 ? BST_CHECKED : BST_UNCHECKED, 0);
     refresh_value_labels();
 }
 
@@ -252,8 +285,8 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             InitCommonControlsEx(&icc);
 
             g_lblMode = make_static(hwnd, "Active mode:  (none yet)", 12, 8, 340, 18);
-            make_static(hwnd, "- Detection -", 12, 30, 200, 16);
-            make_static(hwnd, "- Image adjustments -", 12, 128, 240, 16);
+            make_static(hwnd, "- Detection -", 12, 28, 200, 16);
+            make_static(hwnd, "- Image adjustments -", 12, 196, 240, 16);
 
             for (int i = 0; i < S_COUNT; ++i) {
                 make_static(hwnd, kDefs[i].label, 12, kDefs[i].y + 2, 70, 18);
@@ -265,10 +298,16 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 g_lblVal[i] = make_static(hwnd, "Auto", 290, kDefs[i].y + 2, 66, 18);
             }
 
-            g_lblStatus = make_static(hwnd, " NO LOCK", 12, 308, 340, 42);
-            make_button(hwnd, ID_BTN_SAVE, "Save", 60, 360, 80, 26);
-            make_button(hwnd, ID_BTN_RESET, "Reset", 150, 360, 80, 26);
-            make_button(hwnd, ID_BTN_CLOSE, "Close", 240, 360, 80, 26);
+            g_chkMedian = CreateWindowExA(0, "BUTTON", "Median ring scoring (robust to glare)",
+                                          WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                                          12, 172, 340, 20, hwnd,
+                                          reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_CHK_MEDIAN)),
+                                          g_inst, nullptr);
+
+            g_lblStatus = make_static(hwnd, " NO LOCK", 12, 394, 340, 42);
+            make_button(hwnd, ID_BTN_SAVE, "Save", 60, 446, 80, 26);
+            make_button(hwnd, ID_BTN_RESET, "Reset", 150, 446, 80, 26);
+            make_button(hwnd, ID_BTN_CLOSE, "Close", 240, 446, 80, 26);
 
             {  // open showing the currently-active mode's settings
                 const int m0 = get_status().mode;
@@ -308,6 +347,8 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 controls_from_settings();
             } else if (id == ID_BTN_CLOSE) {
                 ShowWindow(hwnd, SW_HIDE);
+            } else if (id == ID_CHK_MEDIAN) {
+                apply_from_controls();  // checkbox toggled
             }
             return 0;
         }
@@ -327,7 +368,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 void create_window() {
     const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
     const DWORD ex = WS_EX_TOPMOST | WS_EX_TOOLWINDOW;
-    RECT wr{0, 0, 364, 396};
+    RECT wr{0, 0, 364, 482};
     AdjustWindowRectEx(&wr, style, FALSE, ex);
     // Activate the v6 context around creation so this window AND the child controls
     // it makes in WM_CREATE render themed.

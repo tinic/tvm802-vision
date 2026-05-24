@@ -49,6 +49,14 @@ void assign_kv(Settings& s, const std::string& key, double val) {
         s.whitePoint = val;
     else if (key == "sharpen")
         s.sharpen = val;
+    else if (key == "blur")
+        s.blur = val;
+    else if (key == "meanLo")
+        s.meanLo = val;
+    else if (key == "meanHi")
+        s.meanHi = val;
+    else if (key == "medianRings")
+        s.medianRings = val;
 }
 
 void write_section(std::ofstream& f, int m, const Settings& s) {
@@ -61,7 +69,11 @@ void write_section(std::ofstream& f, int m, const Settings& s) {
       << "contrast=" << s.contrast << "\n"
       << "blackPoint=" << s.blackPoint << "\n"
       << "whitePoint=" << s.whitePoint << "\n"
-      << "sharpen=" << s.sharpen << "\n\n";
+      << "sharpen=" << s.sharpen << "\n"
+      << "blur=" << s.blur << "\n"
+      << "meanLo=" << s.meanLo << "\n"
+      << "meanHi=" << s.meanHi << "\n"
+      << "medianRings=" << s.medianRings << "\n\n";
 }
 }  // namespace
 

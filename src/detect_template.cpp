@@ -46,12 +46,15 @@ static MarkResult detect_template_one_field(const cv::Mat& g, const cv::Mat& tb,
                                             const Settings& adj) {
     MarkResult r;
     const double imgMean = cv::mean(g)[0];
-    if (imgMean < kTmpl.meanLo || imgMean > kTmpl.meanHi) return r;  // dropped/blown
+    const double meanLo = adj.meanLo > 0.0 ? adj.meanLo : kTmpl.meanLo;
+    const double meanHi = adj.meanHi > 0.0 ? adj.meanHi : kTmpl.meanHi;
+    if (imgMean < meanLo || imgMean > meanHi) return r;  // dropped/blown
     if (tb.cols >= g.cols || tb.rows >= g.rows) return r;
 
     cv::Mat gb;
-    cv::GaussianBlur(g, gb, cv::Size(kTmpl.blurKernel, kTmpl.blurKernel), 0);  // smooth; no brightness-norm
-    apply_image_adjustments(gb, adj);                                          // SAME adjustments as the template (see prep) so SQDIFF stays valid
+    const int gk = blur_kernel(adj.blur, kTmpl.blurKernel);  // SAME kernel as the template prep
+    cv::GaussianBlur(g, gb, cv::Size(gk, gk), 0);            // smooth; no brightness-norm
+    apply_image_adjustments(gb, adj);                        // SAME adjustments as the template (see prep) so SQDIFF stays valid
 
     // Search ROI = the host's Range, honored directly (it's the red preview circle).
     const double rx = (refX >= 0.0) ? refX : g.cols / 2.0;
@@ -177,7 +180,8 @@ MarkResult detect_template_mark(const void* frame, const unsigned char* template
                 static_cast<size_t>(step))
             .copyTo(templ);
         cv::flip(templ, templ, -1);
-        cv::GaussianBlur(templ, tb, cv::Size(kTmpl.blurKernel, kTmpl.blurKernel), 0);
+        const int gk = blur_kernel(adj.blur, kTmpl.blurKernel);  // SAME kernel as the field
+        cv::GaussianBlur(templ, tb, cv::Size(gk, gk), 0);
         apply_image_adjustments(tb, adj);
     } catch (...) {
         tb.release();  // malformed template -> fall through to the not-found path

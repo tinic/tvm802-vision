@@ -30,4 +30,10 @@ struct Settings;  // settings.h
 // A grayscale subset of the png2amiga preprocess pipeline.
 void apply_image_adjustments(cv::Mat& g, const Settings& s);
 
+// Effective Gaussian pre-blur kernel: the settings value (rounded to an odd size,
+// clamped to [3,25]) when > 0, else the detector's per-mode default. settings 0 =
+// "Auto". Larger smooths a speckled/specular surface so concentric features read
+// uniformly to the detector.
+int blur_kernel(double setting, int dflt);
+
 }  // namespace vis

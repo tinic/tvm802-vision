@@ -60,6 +60,15 @@ bool frame_size(const void* frame, int* w, int* h) {
     return true;
 }
 
+int blur_kernel(double setting, int dflt) {
+    if (setting <= 0.0) return dflt;  // Auto -> detector default
+    int k = static_cast<int>(std::lround(setting));
+    if (k < 3) k = 3;
+    if (k > 25) k = 25;
+    if ((k & 1) == 0) ++k;  // GaussianBlur requires an odd kernel
+    return k;
+}
+
 void apply_image_adjustments(cv::Mat& g, const Settings& s) {
     // Point ops (gamma -> levels -> brightness -> contrast) compose into ONE 8-bit
     // LUT applied in a single pass; each is skipped at its neutral value.
