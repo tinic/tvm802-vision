@@ -37,11 +37,12 @@ preview, and forwards everything else to the original — which you rename to
 
 - [x] **Down-vision complete** — all three mark modes implemented, field-aware,
   and hardware-validated.
-- [~] **Up-vision component detection** (`CheckComp`) — prototype, in progress. A
-  rectilinear-symmetry detector (center + size + angle) runs in **shadow mode**: it
-  computes a pose alongside the original and logs both, but does not drive placement
-  yet, pending on-hardware calibration. A minimum-area-rectangle path is the
-  fallback for asymmetric parts.
+- [~] **Up-vision component detection** (`CheckComp`) — prototype, **disabled by
+  default**. A rectilinear-symmetry detector (center + size + angle) ships but stays
+  inert: `CheckComp` is a pure passthrough unless the operator opts in via a sentinel
+  file, and even then runs only in **shadow mode** — logging a pose alongside the
+  original without driving placement, pending on-hardware calibration. A
+  minimum-area-rectangle path is the fallback for asymmetric parts.
 
 Contributions and test reports (especially on the 802A) are welcome.
 

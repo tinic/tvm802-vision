@@ -8,6 +8,7 @@ namespace {
 constexpr const char* kDir = "C:\\mvision_capture";
 constexpr const char* kTrigger = "C:\\mvision_capture\\on";
 constexpr const char* kFramesTrigger = "C:\\mvision_capture\\frames";
+constexpr const char* kCompTrigger = "C:\\mvision_capture\\comp";
 
 std::atomic<int> g_counter{0};
 
@@ -28,6 +29,10 @@ bool armed() {
 
 bool frames_enabled() {
     return file_exists(kFramesTrigger);
+}
+
+bool comp_enabled() {
+    return file_exists(kCompTrigger);
 }
 
 int next_index() {

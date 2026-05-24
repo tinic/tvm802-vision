@@ -19,6 +19,13 @@ bool armed();
 // and can hurt closed-loop responsiveness. Arm 'on' alone for log-only runs.
 bool frames_enabled();
 
+// True if the up-vision component (CheckComp) PROTOTYPE is enabled (trigger:
+// C:\mvision_capture\comp). It gates the WHOLE prototype: with the sentinel absent
+// (the shipped default) CheckComp is a pure passthrough to the original -- our
+// detector never even runs. Create the file to opt in to the shadow detector + its
+// logging. Kept separate from 'on' so a released DLL can carry the prototype inert.
+bool comp_enabled();
+
 // Reserve the next frame index (atomic, capped). Returns the index or -1 when
 // the per-session cap is reached.
 int next_index();

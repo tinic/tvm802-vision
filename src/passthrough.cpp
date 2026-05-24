@@ -232,7 +232,7 @@ void up_reference_point(const void* frame, double* refX, double* refY) {
 // GetMin_val) for the SAME frame, plus the host inputs -- the dataset that
 // calibrates the comp packing (kUp* constants) and vets our detector vs the vendor.
 void maybe_log_comp(const void* frame, const vis::CompResult& cr) {
-    if (!cap::armed()) return;
+    if (!cap::comp_enabled()) return;
     int idx = cap::next_index();
     if (idx < 0) return;
     if (cap::frames_enabled()) {
@@ -364,12 +364,22 @@ void* __stdcall QueryFrame(void* cam, int timeout) {
     return r;
 }
 
-// CheckComp (up-vision component pose). Our rectlinear-symmetry detector runs on
-// every call. By default (kCompDrive=false) it is SHADOW-ONLY: the original drives
-// placement and both results are logged for calibration (zero placement risk). With
-// kCompDrive=true and a confident detection, our pose drives placement via the
-// comp-mode GetOffset packing, and the original is invoked only for its preview.
+// CheckComp (up-vision component pose). PROTOTYPE -- disabled by default. The whole
+// path is gated behind the C:\mvision_capture\comp sentinel: with it ABSENT (the
+// shipped default) this is a pure passthrough to the original and our detector never
+// runs -- zero added cost or risk. With the sentinel PRESENT, our rectlinear-symmetry
+// detector runs on every call; by default (kCompDrive=false) it is SHADOW-ONLY (the
+// original still drives placement, both results logged for calibration). Only with
+// BOTH the sentinel present AND kCompDrive=true (compile-time) does our pose drive
+// placement via the comp-mode GetOffset packing, with the original called for preview.
 int __stdcall CheckComp(void* f, int hwnd, int w, int h) {
+    // Sentinel gate: inert unless the operator opts in. A released DLL carries the
+    // prototype but does nothing up-vision until C:\mvision_capture\comp is created.
+    if (!cap::comp_enabled()) {
+        g_resultSrc = ResultSrc::Original;
+        return mv::orig::CheckComp(f, hwnd, w, h);
+    }
+
     // Host expected-size prior -> px (soft; dropped if it converts to something
     // implausible, which just means the scale guess is off -- harmless, the detector
     // self-localizes without a prior).
