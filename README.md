@@ -25,6 +25,9 @@ sub-pixel-stable, motion-robust lock — even at high head speed.
   fields for a stable, repeatable sub-pixel lock.
 - Renders its **own 1:1 preview overlay** (reference crosshair, search circle,
   detection marker).
+- **Live, on-machine tuning** via an on-screen settings dialog (**`Ctrl + Alt + M`**)
+  with a real-time lock/score readout — per-mode detection knobs and image
+  adjustments, no recompile (see *Tuning*).
 
 ## How it works
 
@@ -76,17 +79,47 @@ With SurfaceMount **closed**: back up your `MVision.dll`, rename the original to
 
 ## Tuning
 
-Most adjustment is in the app UI, not the code:
+### Live settings dialog — press **Ctrl + Alt + M**
 
-- **Circular** scales its detection radius to the app's **mark-size** setting —
-  set it to match your fiducial; no code change needed.
+While SurfaceMount is running (with a camera view active), the global hotkey
+**`Ctrl + Alt + M`** opens an on-screen settings panel — there's also a faint
+`Ctrl+Alt+M: settings` hint in the bottom-left of the preview. It lets you tune
+detection **on the machine, with no recompile and no file editing**, watching a
+**live readout** (active mode, `LOCKED` / `NO LOCK`, score, detected radius,
+offset) update as you drag — so you adjust until the marker turns green. The
+preview also shows the image adjustments live.
+
+- **Per mode.** Round, Circular, and ImageTemplate each have independent settings;
+  the panel automatically follows whichever mode is running. **Save** writes
+  `MVision.ini` in the app's working directory (reloaded on next launch); **Reset**
+  reverts the current mode. Everything starts at **Auto / neutral**, so nothing
+  changes until you move a control.
+- **Detection:** fiducial **radius** bracket (min/max px), accept **sensitivity**
+  (lower = more lenient), **exposure** gate (min/max frame brightness), and — for
+  Round — **median ring scoring** (more robust to glare).
+- **Image adjustments** (applied before detection): **gamma, brightness, contrast,
+  black/white levels, sharpen,** and a Gaussian **blur** (smooths a speckled or
+  specular pad so it reads cleanly).
+
+> **Stubborn / specular pad not locking?** Raise **Blur** to average out the glare
+> speckle, turn on **median ring scoring**, set the **radius** bracket around the
+> pad, and use **gamma > 1** / **white point** to tame a blown highlight — watch the
+> live score climb past the threshold. (A genuinely domed/specular copper pad may
+> still need light sanding to a matte finish.)
+
+### Host (SurfaceMount) settings
+
+Some behavior comes from the app itself, not this dialog:
+
+- **Circular** scales its detection radius to the app's **mark-size** setting.
 - **ImageTemplate** uses the template image you teach in the UI.
-- **Round** takes any round feature in a fixed 0.5–3.5 mm bracket, searched within
-  the app's **Range** value.
+- **Round** uses the app's **Range** value as the search radius.
 
-Code-level constants live near the top of the per-mode files under `src/`
+### Code-level
+
+Built-in defaults / constants live near the top of the per-mode files under `src/`
 (`detect_circle.cpp`, `detect_template.cpp`, `detect_symmetry.cpp`; shared
-field/frame plumbing in `detect_common.cpp`).
+field/frame plumbing and the image-adjustment chain in `detect_common.cpp`).
 
 ## Caveats
 
