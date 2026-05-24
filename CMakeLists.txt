@@ -64,7 +64,7 @@ if(_build_dll)
     # DLL dependencies at install time.
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-    add_library(MVision SHARED
+    set(MVISION_SOURCES
         src/dllmain.cpp
         src/passthrough.cpp
         src/capture.cpp
@@ -77,26 +77,39 @@ if(_build_dll)
         src/preview.cpp
     )
 
-    set_target_properties(MVision PROPERTIES
-        OUTPUT_NAME "MVision"
-        PREFIX ""
-        SUFFIX ".dll"
-    )
+    # Build one MVision.dll. use_avx2=ON emits AVX2+FMA in OUR translation units
+    # (vectorizes the inner sampling/ring/contrast loops; needs a ~2015+ Haswell/Zen+
+    # CPU at runtime). use_avx2=OFF falls back to the universal x86 SSE2 baseline so
+    # the DLL runs on ANY pre-AVX2 CPU -- shipped as a separate MVision-noavx2.dll for
+    # the rare old PC where the AVX2 build faults with an illegal instruction. (OpenCV
+    # itself is precompiled with its own runtime CPU dispatch, so it is fine either
+    # way; the AVX2 requirement comes only from our own emitted code.)
+    function(add_mvision_dll target output_name use_avx2)
+        add_library(${target} SHARED ${MVISION_SOURCES})
+        set_target_properties(${target} PROPERTIES
+            OUTPUT_NAME "${output_name}" PREFIX "" SUFFIX ".dll")
+        target_include_directories(${target} PRIVATE src)
+        # gdi32: preview.cpp uses GDI (StretchDIBits, GetStockObject, ...).
+        target_link_libraries(${target} PRIVATE ${OpenCV_LIBS} Threads::Threads kernel32 user32 gdi32)
+        target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS)
+        target_compile_options(${target} PRIVATE ${MVISION_WARNINGS})
+        if(MSVC)
+            target_compile_options(${target} PRIVATE /Zc:__cplusplus /EHsc /O2 /fp:contract)
+            if(use_avx2)
+                target_compile_options(${target} PRIVATE /arch:AVX2)
+            endif()
+            # use_avx2=OFF leaves the MSVC x86 default (/arch:SSE2) -- the baseline.
+        else()
+            if(use_avx2)
+                target_compile_options(${target} PRIVATE -mavx2 -mfma)
+            endif()
+        endif()
+    endfunction()
 
-    target_include_directories(MVision PRIVATE src)
-    # gdi32: preview.cpp uses GDI (StretchDIBits, GetStockObject, ...).
-    target_link_libraries(MVision PRIVATE ${OpenCV_LIBS} Threads::Threads kernel32 user32 gdi32)
-
-    target_compile_definitions(MVision PRIVATE _CRT_SECURE_NO_WARNINGS)
-    target_compile_options(MVision PRIVATE ${MVISION_WARNINGS} ${MVISION_SIMD})
-    if(MSVC)
-        # /O2 optimize; /fp:contract allow FMA; /arch:AVX2 vectorize our own inner
-        # loops (circularity ring, contrast window, centroid reduce) -- OpenCV is
-        # precompiled with its own CPU dispatch. Requires an AVX2-capable CPU at
-        # runtime (anything from ~2015 / Haswell+ / Zen+).
-        target_compile_options(MVision PRIVATE /Zc:__cplusplus /EHsc
-                               /O2 /fp:contract /arch:AVX2)
-    endif()
+    # Default DLL (recommended for modern CPUs) + the no-AVX2 baseline variant. Same
+    # ABI and behavior; build both so the right one can be dropped in as MVision.dll.
+    add_mvision_dll(MVision "MVision" ON)
+    add_mvision_dll(MVision_noavx2 "MVision-noavx2" OFF)
 
     # Exports: __declspec(dllexport) in source auto-emits _Name@N stdcall names.
     # The SetUpisionOffsetXY typo alias is added via #pragma in passthrough.cpp.

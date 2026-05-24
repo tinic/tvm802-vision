@@ -50,14 +50,23 @@ Contributions and test reports (especially on the 802A) are welcome.
 CI builds a self-contained `MVision.dll` (x86, static OpenCV) on every push:
 
 - **Latest:** the **Actions** tab → newest `build` run → `MVision-x86` artifact.
-- **Releases:** the DLL is attached to each `v*` tag.
+- **Releases:** the DLLs are attached to each `v*` tag.
+
+Two builds are produced (same code, same ABI — pick one and rename it to
+`MVision.dll`):
+
+- **`MVision.dll`** — AVX2, recommended for any CPU from ~2015 on (Haswell / Zen+).
+- **`MVision-noavx2.dll`** — SSE2 baseline, for older CPUs. Use it if `MVision.dll`
+  crashes with an illegal-instruction fault. (OpenCV does its own runtime CPU
+  dispatch, so only our own code carries the AVX2 requirement.)
 
 ## Build
 
 A 32-bit (x86) MSVC build — it must match the host process. Install Visual Studio
 Build Tools, CMake, and **vcpkg**; OpenCV is pulled in automatically (minimal,
-static) from `vcpkg.json`. Set `VCPKG_ROOT`, then run **`build-cmake.bat`** →
-`build\Release\MVision.dll`.
+static) from `vcpkg.json`. Set `VCPKG_ROOT`, then run **`build-cmake.bat`**. This
+produces both `build\Release\MVision.dll` (AVX2) and `build\Release\MVision-noavx2.dll`
+(SSE2 baseline).
 
 ## Install
 

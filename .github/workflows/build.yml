@@ -95,24 +95,35 @@ jobs:
 
       - name: Show result
         shell: pwsh
-        run: Get-ChildItem build\Release\MVision.dll | Format-List Name,Length,LastWriteTime
+        run: Get-ChildItem build\Release\MVision.dll,build\Release\MVision-noavx2.dll | Format-List Name,Length,LastWriteTime
 
-      - name: Upload DLL artifact
+      - name: Upload DLL artifacts
         uses: actions/upload-artifact@v4
         with:
           name: MVision-x86
-          path: build/Release/MVision.dll
+          path: |
+            build/Release/MVision.dll
+            build/Release/MVision-noavx2.dll
           if-no-files-found: error
 
-      - name: Attach DLL to Release (tag builds only)
+      - name: Attach DLLs to Release (tag builds only)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: build/Release/MVision.dll
+          files: |
+            build/Release/MVision.dll
+            build/Release/MVision-noavx2.dll
           generate_release_notes: true
           body: |
             Drop-in OpenCV down-vision fiducial detector for the QiHe TVM802A / TVM802B.
 
-            Download `MVision.dll` below. You must supply your own original
-            `MVision.dll` (rename it `MVision-orig.dll`) — see the README for
-            install/build instructions. Built x86, static OpenCV (self-contained).
+            Two builds (same code, same ABI) — download one and, if needed, rename it
+            to `MVision.dll`:
+            - **`MVision.dll`** — AVX2, recommended for any CPU from ~2015 on
+              (Haswell / Zen or newer).
+            - **`MVision-noavx2.dll`** — SSE2 baseline, for older CPUs. Use this if
+              `MVision.dll` crashes with an illegal-instruction fault.
+
+            You must supply your own original `MVision.dll` (rename it
+            `MVision-orig.dll`) — see the README for install/build instructions.
+            Built x86, static OpenCV (self-contained).
