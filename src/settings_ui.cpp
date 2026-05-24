@@ -24,6 +24,10 @@
 #include <string>
 #include <thread>
 
+#ifndef MVISION_VERSION  // injected by CMake from `git describe`; fallback for ad-hoc builds
+#define MVISION_VERSION "dev"
+#endif
+
 namespace vis {
 namespace {
 
@@ -450,7 +454,7 @@ void create_window() {
     // it makes in WM_CREATE render themed.
     ULONG_PTR cookie = 0;
     const bool act = (g_actctx != INVALID_HANDLE_VALUE) && ActivateActCtx(g_actctx, &cookie);
-    g_win = CreateWindowExA(ex, kClassName, "MVision Settings", style,
+    g_win = CreateWindowExA(ex, kClassName, "MVision Settings  " MVISION_VERSION, style,
                             CW_USEDEFAULT, CW_USEDEFAULT,
                             wr.right - wr.left, wr.bottom - wr.top,
                             nullptr, nullptr, g_inst, nullptr);

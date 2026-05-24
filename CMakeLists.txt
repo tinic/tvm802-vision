@@ -7,6 +7,20 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Version string for the UI, from git (self-maintaining; tag build -> "v1.7.2",
+# dev build -> "v1.7.1-3-gabc123-dirty"). Falls back to "dev" outside a git tree.
+find_package(Git QUIET)
+if(Git_FOUND)
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} describe --tags --dirty --always
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        OUTPUT_VARIABLE MVISION_VERSION OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+endif()
+if(NOT MVISION_VERSION)
+    set(MVISION_VERSION "dev")
+endif()
+message(STATUS "MVision version: ${MVISION_VERSION}")
+
 # The MVision.dll replacement must be x86 to match SurfaceMount.exe (i386). The
 # offline test harness (BUILD_TESTS) has no such constraint, so on a 64-bit host
 # we build the tests only and skip the DLL rather than failing configuration.
@@ -96,7 +110,8 @@ if(_build_dll)
         # ws2_32 + iphlpapi: controller.cpp reads the px/mm scale from the motion
         # controller (TCP), discovering its endpoint via the host's own connection.
         target_link_libraries(${target} PRIVATE ${OpenCV_LIBS} Threads::Threads kernel32 user32 gdi32 comctl32 ws2_32 iphlpapi)
-        target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS)
+        target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS
+                                   MVISION_VERSION="${MVISION_VERSION}")
         target_compile_options(${target} PRIVATE ${MVISION_WARNINGS})
         if(MSVC)
             target_compile_options(${target} PRIVATE /Zc:__cplusplus /EHsc /O2 /fp:contract)
