@@ -91,6 +91,7 @@ HINSTANCE g_inst = nullptr;
 HWND g_win = nullptr;
 HWND g_lblMode = nullptr, g_lblStatus = nullptr;
 HWND g_tb[S_COUNT] = {};
+HWND g_lblName[S_COUNT] = {};
 HWND g_lblVal[S_COUNT] = {};
 HWND g_chkMedian = nullptr;
 HBRUSH g_brGreen = nullptr, g_brRed = nullptr;
@@ -227,6 +228,28 @@ void apply_from_controls() {
     refresh_value_labels();
 }
 
+// Which controls actually affect a given mode (the rest are greyed out).
+bool slider_applies(int mode, int idx) {
+    switch (idx) {
+        case S_SYM: return mode == MODE_ROUND;  // symmetry accept threshold: Round only
+        case S_RMIN:
+        case S_RMAX: return mode == MODE_ROUND || mode == MODE_CIRCULAR;  // radius bracket
+        default: return true;                                             // exposure gate + all image adjustments: every mode
+    }
+}
+
+// Enable/disable each control (and its name + value labels) for the active mode, so
+// settings that have no effect read as greyed out.
+void update_enabled(int mode) {
+    for (int i = 0; i < S_COUNT; ++i) {
+        const BOOL en = slider_applies(mode, i) ? TRUE : FALSE;
+        EnableWindow(g_tb[i], en);
+        EnableWindow(g_lblName[i], en);
+        EnableWindow(g_lblVal[i], en);
+    }
+    EnableWindow(g_chkMedian, mode == MODE_ROUND ? TRUE : FALSE);  // median ring scoring: Round only
+}
+
 void controls_from_settings() {
     const Settings s = get_settings(g_curMode);
     int pos[S_COUNT];
@@ -245,6 +268,7 @@ void controls_from_settings() {
     for (int i = 0; i < S_COUNT; ++i)
         SendMessageA(g_tb[i], TBM_SETPOS, TRUE, static_cast<LPARAM>(pos[i]));
     SendMessageA(g_chkMedian, BM_SETCHECK, s.medianRings > 0.5 ? BST_CHECKED : BST_UNCHECKED, 0);
+    update_enabled(g_curMode);
     refresh_value_labels();
 }
 
@@ -289,7 +313,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             make_static(hwnd, "- Image adjustments -", 12, 196, 240, 16);
 
             for (int i = 0; i < S_COUNT; ++i) {
-                make_static(hwnd, kDefs[i].label, 12, kDefs[i].y + 2, 90, 18);  // wide enough for "Exposure min"
+                g_lblName[i] = make_static(hwnd, kDefs[i].label, 12, kDefs[i].y + 2, 90, 18);  // wide enough for "Exposure min"
                 g_tb[i] = CreateWindowExA(0, "msctls_trackbar32", "",
                                           WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
                                           106, kDefs[i].y, 176, 24, hwnd, nullptr, g_inst, nullptr);
