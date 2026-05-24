@@ -34,9 +34,9 @@ struct CsymParams {
     // black area bordering a bright edge divides a large variance by a ~0 median.
     double medianMeanFrac = 0.5;  // median denom floored at this x the mean within-ring var
     double minDenomVar = 2.0;     // absolute denominator noise floor (was 1e-6 -> blow-up)
-    int coarseStep = 4;        // center grid: coarse pass (fine pass refines +-fineSpan)
-    int fineSpan = 3;          // +-span around the coarse winner at 1px (>= coarseStep/2)
-    int coarseSampleStep = 2;  // ring/point subsample for the coarse pass (4x cheaper)
+    int coarseStep = 4;           // center grid: coarse pass (fine pass refines +-fineSpan)
+    int fineSpan = 3;             // +-span around the coarse winner at 1px (>= coarseStep/2)
+    int coarseSampleStep = 2;     // ring/point subsample for the coarse pass (4x cheaper)
 };
 constexpr CsymParams kCsym;
 
