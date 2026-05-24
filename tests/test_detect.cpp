@@ -97,7 +97,7 @@ int synthetic_comp_check() {
                                               /*searchRadiusPx=*/60);
     const char* method = r.method == vis::CompResult::Method::Symmetry      ? "symmetry"
                          : r.method == vis::CompResult::Method::MinAreaRect ? "minarearect"
-                                                                           : "none";
+                                                                            : "none";
     std::printf("synthetic-comp: found=%d cx=%.2f cy=%.2f w=%.2f h=%.2f angle=%.2f q=%.3f method=%s\n",
                 r.found ? 1 : 0, r.cx, r.cy, r.w, r.h, r.angle, r.quality, method);
     if (!r.found) {
@@ -111,9 +111,18 @@ int synthetic_comp_check() {
     double ea = std::abs(r.angle - static_cast<double>(angle));
     if (ea > 45.0) ea = std::abs(ea - 90.0);  // 90-deg labeling is acceptable
     int rc = 0;
-    if (ec > 3.0) { std::printf("FAIL: center off by %.2f px (tol 3.0)\n", ec); rc = 1; }
-    if (ew > 6.0 || eh > 6.0) { std::printf("FAIL: size off (%.2f, %.2f) px (tol 6.0)\n", ew, eh); rc = 1; }
-    if (ea > 4.0) { std::printf("FAIL: angle off by %.2f deg (tol 4.0)\n", ea); rc = 1; }
+    if (ec > 3.0) {
+        std::printf("FAIL: center off by %.2f px (tol 3.0)\n", ec);
+        rc = 1;
+    }
+    if (ew > 6.0 || eh > 6.0) {
+        std::printf("FAIL: size off (%.2f, %.2f) px (tol 6.0)\n", ew, eh);
+        rc = 1;
+    }
+    if (ea > 4.0) {
+        std::printf("FAIL: angle off by %.2f deg (tol 4.0)\n", ea);
+        rc = 1;
+    }
     if (rc == 0) std::printf("PASS: center %.2fpx, size (%.2f,%.2f), angle %.2fdeg\n", ec, ew, eh, ea);
     return rc;
 }
@@ -130,7 +139,7 @@ int inverted_bracket_check() {
     vis::Settings bad;
     bad.radiusMinPx = 50.0;  // above the default max (34) with max left Auto -> inverted
     bad.radiusMaxPx = 0.0;
-    vis::set_settings(bad);
+    vis::set_settings(vis::MODE_ROUND, bad);
     bool threw = false;
     vis::MarkResult r;
     try {
@@ -138,7 +147,7 @@ int inverted_bracket_check() {
     } catch (...) {
         threw = true;
     }
-    vis::set_settings(vis::Settings{});  // restore defaults for the other checks
+    vis::set_settings(vis::MODE_ROUND, vis::Settings{});  // restore defaults for the other checks
 
     std::printf("inverted-bracket: threw=%d found=%d\n", threw ? 1 : 0, r.found ? 1 : 0);
     if (threw) {

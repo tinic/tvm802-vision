@@ -1,6 +1,7 @@
 #include "vision.h"
 
 #include "detect_common.h"
+#include "settings.h"
 
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
@@ -41,7 +42,8 @@ constexpr TemplateParams kTmpl;
 static MarkResult detect_template_one_field(const cv::Mat& g, const cv::Mat& tb,
                                             int size, int strength,
                                             double refX, double refY,
-                                            int searchRadiusPx, double* ioScale) {
+                                            int searchRadiusPx, double* ioScale,
+                                            const Settings& adj) {
     MarkResult r;
     const double imgMean = cv::mean(g)[0];
     if (imgMean < kTmpl.meanLo || imgMean > kTmpl.meanHi) return r;  // dropped/blown
@@ -49,6 +51,7 @@ static MarkResult detect_template_one_field(const cv::Mat& g, const cv::Mat& tb,
 
     cv::Mat gb;
     cv::GaussianBlur(g, gb, cv::Size(kTmpl.blurKernel, kTmpl.blurKernel), 0);  // smooth; no brightness-norm
+    apply_image_adjustments(gb, adj);                                          // SAME adjustments as the template (see prep) so SQDIFF stays valid
 
     // Search ROI = the host's Range, honored directly (it's the red preview circle).
     const double rx = (refX >= 0.0) ? refX : g.cols / 2.0;
@@ -163,6 +166,9 @@ MarkResult detect_template_mark(const void* frame, const unsigned char* template
     // stride), 180-deg flipped (the host stores it rotated 180° relative to our
     // frame — required for asymmetric marks), then pre-blurred to match the
     // per-field 5x5 smoothing.
+    // Per-mode image adjustments: applied identically to the template here and to
+    // the field in detect_template_one_field, so the SQDIFF match stays valid.
+    const Settings adj = get_settings(MODE_TEMPLATE);
     cv::Mat tb;
     try {
         const int step = (size + 3) & ~3;
@@ -172,6 +178,7 @@ MarkResult detect_template_mark(const void* frame, const unsigned char* template
             .copyTo(templ);
         cv::flip(templ, templ, -1);
         cv::GaussianBlur(templ, tb, cv::Size(kTmpl.blurKernel, kTmpl.blurKernel), 0);
+        apply_image_adjustments(tb, adj);
     } catch (...) {
         tb.release();  // malformed template -> fall through to the not-found path
     }
@@ -181,7 +188,7 @@ MarkResult detect_template_mark(const void* frame, const unsigned char* template
 
     MarkResult r = detect_with_fields(frame, [&](const cv::Mat& g) {
         return detect_template_one_field(g, tb, size, strength, refX, refY,
-                                         searchRadiusPx, ioScale);
+                                         searchRadiusPx, ioScale, adj);
     });
     r.shape = MarkShape::Square;  // ImageTemplate: the preview draws the matched square
     return r;

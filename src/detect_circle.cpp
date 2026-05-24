@@ -208,7 +208,7 @@ static MarkResult detect_one_field(const cv::Mat& gFull, int markSizePx,
     }
     // Settings override (the settings UI's radius bracket replaces the size-derived
     // one, so a user whose px/mm or fiducial size differs can fix detection live).
-    const Settings cfg = get_settings();
+    const Settings cfg = get_settings(MODE_CIRCULAR);
     if (cfg.radiusMinPx > 0.0) minRfull = static_cast<int>(cfg.radiusMinPx);
     if (cfg.radiusMaxPx > 0.0) maxRfull = static_cast<int>(cfg.radiusMaxPx);
     if (maxRfull <= minRfull) maxRfull = minRfull + 1;  // guard against an inverted bracket

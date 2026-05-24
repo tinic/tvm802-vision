@@ -27,12 +27,21 @@ struct Settings {
     double sharpen = 0.0;     // 0 = off; >0 unsharp, <0 blur (-1..+1)
 };
 
-// Thread-safe snapshot / update (the UI thread writes; detector threads read).
-Settings get_settings();
-void set_settings(const Settings& s);
+// Mark modes (match LiveStatus.mode). Settings are kept PER MODE, so Round /
+// Circular / ImageTemplate each have an independent tuning.
+enum { MODE_NONE = 0,
+       MODE_ROUND = 1,
+       MODE_CIRCULAR = 2,
+       MODE_TEMPLATE = 3,
+       MODE_COUNT = 4 };
 
-// Persistence: a trivial "key=value" text file. load is a no-op if the file is
-// absent or unreadable, so a fresh install runs on built-in defaults.
+// Thread-safe per-mode snapshot / update (the UI thread writes; detector threads
+// read). A mode outside [1,3] is clamped to MODE_ROUND.
+Settings get_settings(int mode);
+void set_settings(int mode, const Settings& s);
+
+// Persistence: an INI with one [round]/[circular]/[template] section per mode. load
+// is a no-op if the file is absent/unreadable, so a fresh install runs on defaults.
 void load_settings(const char* path);
 void save_settings(const char* path);
 

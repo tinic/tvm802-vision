@@ -54,7 +54,7 @@ bool render_preview(const void* frame, void* hwndV, double mvoX, double mvoY,
             cv::extractChannel(img, gray, 0);  // mono capture: plane 0 == gray
         else
             return false;
-        apply_image_adjustments(gray, get_settings());
+        apply_image_adjustments(gray, get_settings(get_status().mode));  // active mode's adjustments
         cv::Mat bgr;
         cv::cvtColor(gray, bgr, cv::COLOR_GRAY2BGR);
 

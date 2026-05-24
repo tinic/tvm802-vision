@@ -237,7 +237,7 @@ MarkResult detect_circular_symmetry(const void* frame, double refX, double refY,
     // unwind into the .NET host (undefined behavior, crash). Report not-found instead.
     try {
         // Precedence: UI/settings override > caller's diameter hint > built-in default.
-        const Settings cfg = get_settings();
+        const Settings cfg = get_settings(MODE_ROUND);
         double minR = cfg.radiusMinPx > 0.0 ? cfg.radiusMinPx
                       : (minDiaPx > 0)      ? minDiaPx / 2.0
                                             : static_cast<double>(kCsym.minRadiusPx);

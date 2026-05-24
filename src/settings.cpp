@@ -11,18 +11,68 @@
 namespace vis {
 namespace {
 std::mutex g_mu;
-Settings g_settings;
+Settings g_settings[MODE_COUNT];  // indexed by mode; [1..3] used
 LiveStatus g_status;
-}  // namespace
 
-Settings get_settings() {
-    std::lock_guard<std::mutex> lk(g_mu);
-    return g_settings;
+int clamp_mode(int m) {
+    return (m >= MODE_ROUND && m <= MODE_TEMPLATE) ? m : MODE_ROUND;
 }
 
-void set_settings(const Settings& s) {
+const char* mode_name(int m) {
+    return m == MODE_ROUND ? "round" : m == MODE_CIRCULAR ? "circular"
+                                                          : "template";
+}
+
+int mode_from_name(const std::string& s) {
+    if (s == "round") return MODE_ROUND;
+    if (s == "circular") return MODE_CIRCULAR;
+    if (s == "template") return MODE_TEMPLATE;
+    return MODE_NONE;
+}
+
+void assign_kv(Settings& s, const std::string& key, double val) {
+    if (key == "radiusMinPx")
+        s.radiusMinPx = val;
+    else if (key == "radiusMaxPx")
+        s.radiusMaxPx = val;
+    else if (key == "minSymmetry")
+        s.minSymmetry = val;
+    else if (key == "gamma")
+        s.gamma = val;
+    else if (key == "brightness")
+        s.brightness = val;
+    else if (key == "contrast")
+        s.contrast = val;
+    else if (key == "blackPoint")
+        s.blackPoint = val;
+    else if (key == "whitePoint")
+        s.whitePoint = val;
+    else if (key == "sharpen")
+        s.sharpen = val;
+}
+
+void write_section(std::ofstream& f, int m, const Settings& s) {
+    f << "[" << mode_name(m) << "]\n"
+      << "radiusMinPx=" << s.radiusMinPx << "\n"
+      << "radiusMaxPx=" << s.radiusMaxPx << "\n"
+      << "minSymmetry=" << s.minSymmetry << "\n"
+      << "gamma=" << s.gamma << "\n"
+      << "brightness=" << s.brightness << "\n"
+      << "contrast=" << s.contrast << "\n"
+      << "blackPoint=" << s.blackPoint << "\n"
+      << "whitePoint=" << s.whitePoint << "\n"
+      << "sharpen=" << s.sharpen << "\n\n";
+}
+}  // namespace
+
+Settings get_settings(int mode) {
     std::lock_guard<std::mutex> lk(g_mu);
-    g_settings = s;
+    return g_settings[clamp_mode(mode)];
+}
+
+void set_settings(int mode, const Settings& s) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    g_settings[clamp_mode(mode)] = s;
 }
 
 LiveStatus get_status() {
@@ -39,49 +89,34 @@ void load_settings(const char* path) {
     if (!path) return;
     std::ifstream f(path);
     if (!f) return;
-    Settings s;
+    Settings parsed[MODE_COUNT];  // start from defaults; fill the sections present
+    int cur = MODE_NONE;
     std::string line;
     while (std::getline(f, line)) {
+        if (!line.empty() && line.front() == '[') {
+            const std::string::size_type rb = line.find(']');
+            if (rb != std::string::npos) cur = mode_from_name(line.substr(1, rb - 1));
+            continue;
+        }
+        if (cur == MODE_NONE) continue;  // keys before any [section] are ignored
         const std::string::size_type eq = line.find('=');
         if (eq == std::string::npos) continue;
-        const std::string key = line.substr(0, eq);
-        const double val = std::atof(line.c_str() + eq + 1);
-        if (key == "radiusMinPx")
-            s.radiusMinPx = val;
-        else if (key == "radiusMaxPx")
-            s.radiusMaxPx = val;
-        else if (key == "minSymmetry")
-            s.minSymmetry = val;
-        else if (key == "gamma")
-            s.gamma = val;
-        else if (key == "brightness")
-            s.brightness = val;
-        else if (key == "contrast")
-            s.contrast = val;
-        else if (key == "blackPoint")
-            s.blackPoint = val;
-        else if (key == "whitePoint")
-            s.whitePoint = val;
-        else if (key == "sharpen")
-            s.sharpen = val;
+        assign_kv(parsed[cur], line.substr(0, eq), std::atof(line.c_str() + eq + 1));
     }
-    set_settings(s);
+    std::lock_guard<std::mutex> lk(g_mu);
+    for (int m = MODE_ROUND; m <= MODE_TEMPLATE; ++m) g_settings[m] = parsed[m];
 }
 
 void save_settings(const char* path) {
     if (!path) return;
-    const Settings s = get_settings();
+    Settings snap[MODE_COUNT];
+    {
+        std::lock_guard<std::mutex> lk(g_mu);
+        for (int m = MODE_ROUND; m <= MODE_TEMPLATE; ++m) snap[m] = g_settings[m];
+    }
     std::ofstream f(path, std::ios::trunc);
     if (!f) return;
-    f << "radiusMinPx=" << s.radiusMinPx << "\n"
-      << "radiusMaxPx=" << s.radiusMaxPx << "\n"
-      << "minSymmetry=" << s.minSymmetry << "\n"
-      << "gamma=" << s.gamma << "\n"
-      << "brightness=" << s.brightness << "\n"
-      << "contrast=" << s.contrast << "\n"
-      << "blackPoint=" << s.blackPoint << "\n"
-      << "whitePoint=" << s.whitePoint << "\n"
-      << "sharpen=" << s.sharpen << "\n";
+    for (int m = MODE_ROUND; m <= MODE_TEMPLATE; ++m) write_section(f, m, snap[m]);
 }
 
 }  // namespace vis

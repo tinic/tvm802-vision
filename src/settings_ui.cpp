@@ -84,6 +84,7 @@ HWND g_tb[S_COUNT] = {};
 HWND g_lblVal[S_COUNT] = {};
 HBRUSH g_brGreen = nullptr, g_brRed = nullptr;
 bool g_lastFound = false;
+int g_curMode = MODE_ROUND;              // which mode's settings the sliders currently edit
 HFONT g_font = nullptr;                  // host-matching UI font (system dialog font)
 HANDLE g_actctx = INVALID_HANDLE_VALUE;  // comctl32 v6 activation context -> themed controls
 
@@ -193,12 +194,12 @@ void apply_from_controls() {
     s.blackPoint = map_to_setting(S_BLK, tb_pos(S_BLK));
     s.whitePoint = map_to_setting(S_WHT, tb_pos(S_WHT));
     s.sharpen = map_to_setting(S_SHP, tb_pos(S_SHP));
-    set_settings(s);
+    set_settings(g_curMode, s);
     refresh_value_labels();
 }
 
 void controls_from_settings() {
-    const Settings s = get_settings();
+    const Settings s = get_settings(g_curMode);
     int pos[S_COUNT];
     pos[S_RMIN] = static_cast<int>(s.radiusMinPx);
     pos[S_RMAX] = static_cast<int>(s.radiusMaxPx);
@@ -216,6 +217,12 @@ void controls_from_settings() {
 
 void refresh_status() {
     const LiveStatus st = get_status();
+    // Follow the active mark mode: when it changes, load THAT mode's settings into
+    // the sliders (each mode has its own tuning).
+    if (st.mode >= MODE_ROUND && st.mode <= MODE_TEMPLATE && st.mode != g_curMode) {
+        g_curMode = st.mode;
+        controls_from_settings();
+    }
     const char* mode = st.mode == 1   ? "Round (CheckMark)"
                        : st.mode == 2 ? "Circular (CheckMark2)"
                        : st.mode == 3 ? "Template (CheckTemplate)"
@@ -263,6 +270,10 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             make_button(hwnd, ID_BTN_RESET, "Reset", 150, 360, 80, 26);
             make_button(hwnd, ID_BTN_CLOSE, "Close", 240, 360, 80, 26);
 
+            {  // open showing the currently-active mode's settings
+                const int m0 = get_status().mode;
+                if (m0 >= MODE_ROUND && m0 <= MODE_TEMPLATE) g_curMode = m0;
+            }
             controls_from_settings();
             if (g_font) {  // host-matching font on every control
                 EnumChildWindows(hwnd, set_font_cb, reinterpret_cast<LPARAM>(g_font));
@@ -293,8 +304,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 apply_from_controls();
                 save_settings(g_iniPath.c_str());
             } else if (id == ID_BTN_RESET) {
-                Settings def;  // all Auto / neutral
-                set_settings(def);
+                set_settings(g_curMode, Settings{});  // reset only the current mode
                 controls_from_settings();
             } else if (id == ID_BTN_CLOSE) {
                 ShowWindow(hwnd, SW_HIDE);
