@@ -183,8 +183,8 @@ double CircularSymmetry::score(const cv::Mat& g, double cx, double cy, double& e
     double wRingVar = 0.0, wSum = 0.0, maxRingVar = -1.0;
     edgeR = 0.0;
     const double wlim = g.cols - 1.0, hlim = g.rows - 1.0;
-    const uchar* data = g.ptr<uchar>(0);  // row pointer/stride computed ONCE here,
-    const ptrdiff_t gstep = g.step[0];    // not via cv::Mat::ptr() per sample point
+    const uchar* data = g.ptr<uchar>(0);                        // row pointer/stride computed ONCE here,
+    const ptrdiff_t gstep = static_cast<ptrdiff_t>(g.step[0]);  // not cv::Mat::ptr() per sample
     const int nRings = static_cast<int>(ringR_.size());
     for (int ri = 0; ri < nRings; ri += step) {
         const int a = ringStart_[static_cast<size_t>(ri)];
