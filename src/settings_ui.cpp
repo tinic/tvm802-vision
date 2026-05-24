@@ -80,6 +80,52 @@ HWND g_tb[S_COUNT] = {};
 HWND g_lblVal[S_COUNT] = {};
 HBRUSH g_brGreen = nullptr, g_brRed = nullptr;
 bool g_lastFound = false;
+HFONT g_font = nullptr;                  // host-matching UI font (system dialog font)
+HANDLE g_actctx = INVALID_HANDLE_VALUE;  // comctl32 v6 activation context -> themed controls
+
+// The system dialog font -- what native dialogs and the (themed) host use, so our
+// controls match instead of the legacy bitmap "System" font.
+HFONT create_ui_font() {
+    NONCLIENTMETRICSA ncm{};
+    ncm.cbSize = sizeof ncm;
+    if (SystemParametersInfoA(SPI_GETNONCLIENTMETRICS, sizeof ncm, &ncm, 0))
+        return CreateFontIndirectA(&ncm.lfMessageFont);
+    return nullptr;
+}
+
+BOOL CALLBACK set_font_cb(HWND child, LPARAM f) {  // __stdcall (CALLBACK) for x86 safety
+    SendMessageA(child, WM_SETFONT, reinterpret_cast<WPARAM>(reinterpret_cast<HFONT>(f)), TRUE);
+    return TRUE;
+}
+
+// Build a comctl32 v6 activation context from a throwaway manifest so the trackbars
+// and buttons render with visual styles (themed), like the host. The host enables
+// visual styles only on its own UI thread, so our separate thread needs its own
+// context; we activate it around control creation. Returns INVALID_HANDLE_VALUE on
+// failure (controls then fall back to the classic look -- no crash).
+HANDLE make_v6_context() {
+    char dir[MAX_PATH] = {};
+    if (GetTempPathA(MAX_PATH, dir) == 0) return INVALID_HANDLE_VALUE;
+    char path[MAX_PATH] = {};
+    if (GetTempFileNameA(dir, "mvm", 0, path) == 0) return INVALID_HANDLE_VALUE;
+    FILE* f = std::fopen(path, "wb");
+    if (!f) return INVALID_HANDLE_VALUE;
+    static const char kManifest[] =
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\r\n"
+        "<assembly xmlns=\"urn:schemas-microsoft-com:asm.v1\" manifestVersion=\"1.0\">\r\n"
+        "<dependency><dependentAssembly><assemblyIdentity type=\"win32\" "
+        "name=\"Microsoft.Windows.Common-Controls\" version=\"6.0.0.0\" "
+        "processorArchitecture=\"*\" publicKeyToken=\"6595b64144ccf1df\" language=\"*\"/>"
+        "</dependentAssembly></dependency></assembly>\r\n";
+    std::fwrite(kManifest, 1, sizeof(kManifest) - 1, f);
+    std::fclose(f);
+    ACTCTXA actx{};
+    actx.cbSize = sizeof actx;
+    actx.lpSource = path;
+    HANDLE h = CreateActCtxA(&actx);
+    DeleteFileA(path);  // CreateActCtx has parsed it; the context lives independently
+    return h;
+}
 
 HWND make_static(HWND parent, const char* text, int x, int y, int w, int h) {
     return CreateWindowExA(0, "STATIC", text, WS_CHILD | WS_VISIBLE, x, y, w, h, parent,
@@ -214,6 +260,10 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             make_button(hwnd, ID_BTN_CLOSE, "Close", 240, 360, 80, 26);
 
             controls_from_settings();
+            if (g_font) {  // host-matching font on every control
+                EnumChildWindows(hwnd, set_font_cb, reinterpret_cast<LPARAM>(g_font));
+                SendMessageA(hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(g_font), TRUE);
+            }
             SetTimer(hwnd, static_cast<UINT_PTR>(ID_TIMER), 120, nullptr);
             return 0;
         }
@@ -265,10 +315,15 @@ void create_window() {
     const DWORD ex = WS_EX_TOPMOST | WS_EX_TOOLWINDOW;
     RECT wr{0, 0, 364, 396};
     AdjustWindowRectEx(&wr, style, FALSE, ex);
+    // Activate the v6 context around creation so this window AND the child controls
+    // it makes in WM_CREATE render themed.
+    ULONG_PTR cookie = 0;
+    const bool act = (g_actctx != INVALID_HANDLE_VALUE) && ActivateActCtx(g_actctx, &cookie);
     g_win = CreateWindowExA(ex, kClassName, "MVision Settings", style,
                             CW_USEDEFAULT, CW_USEDEFAULT,
                             wr.right - wr.left, wr.bottom - wr.top,
                             nullptr, nullptr, g_inst, nullptr);
+    if (act) DeactivateActCtx(0, cookie);
 }
 
 void toggle_window() {
@@ -286,6 +341,8 @@ void ui_thread() {
     g_inst = GetModuleHandleA(nullptr);
     g_brGreen = CreateSolidBrush(RGB(40, 150, 60));
     g_brRed = CreateSolidBrush(RGB(170, 50, 50));
+    g_actctx = make_v6_context();  // themed controls
+    g_font = create_ui_font();     // host-matching font
 
     WNDCLASSEXA wc{};
     wc.cbSize = sizeof wc;
