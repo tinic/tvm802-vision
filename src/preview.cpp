@@ -20,9 +20,48 @@
 #include <windows.h>  // GDI for self-render (otherwise defines min/max macros)
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 namespace vis {
+
+namespace {
+
+// Blit a continuous CV_8UC3 (cw x ch, cw a multiple of 4 so the cw*3 row stride is
+// DIB-aligned) 1:1 to the control's window, black-filling any border when the window
+// is larger than the native crop. This is the ONLY GDI in the module -- all overlay
+// graphics are drawn in OpenCV beforehand. No OpenCV calls happen between GetDC and
+// ReleaseDC, so the DC cannot leak; the caller has already finished a no-throw build
+// of `work`, so nothing unwinds across the C ABI here either.
+bool blit_to_hwnd(HWND hwnd, const cv::Mat& work, int cw, int ch, int rw, int rh) {
+    HDC dc = GetDC(hwnd);
+    if (dc == nullptr) {
+        return false;
+    }
+    BITMAPINFO bmi;
+    ZeroMemory(&bmi, sizeof(bmi));
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = cw;
+    bmi.bmiHeader.biHeight = -ch;  // negative = top-down (matches cv::Mat)
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 24;
+    bmi.bmiHeader.biCompression = BI_RGB;
+    SetStretchBltMode(dc, COLORONCOLOR);
+    StretchDIBits(dc, 0, 0, cw, ch, 0, 0, cw, ch, work.data, &bmi, DIB_RGB_COLORS, SRCCOPY);
+    auto black = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
+    if (rw > cw) {
+        const RECT s{cw, 0, rw, rh};
+        FillRect(dc, &s, black);
+    }
+    if (rh > ch) {
+        const RECT s{0, ch, cw, rh};
+        FillRect(dc, &s, black);
+    }
+    ReleaseDC(hwnd, dc);
+    return true;
+}
+
+}  // namespace
 
 bool render_preview(const void* frame, void* hwndV, double mvoX, double mvoY,
                     int searchRadiusPx, const MarkResult& mr) {
@@ -200,36 +239,118 @@ bool render_preview(const void* frame, void* hwndV, double mvoX, double mvoY,
         return false;  // never let an OpenCV failure reach the host
     }
 
-    // GDI section: NO OpenCV calls between GetDC and ReleaseDC, so the DC cannot
-    // leak. `work` is a continuous CV_8UC3 of size cw x ch (cw is a multiple of
-    // 4, so the cw*3 row stride is DIB-aligned).
-    HDC dc = GetDC(hwnd);
-    if (dc == nullptr) {
+    return blit_to_hwnd(hwnd, work, cw, ch, rw, rh);
+}
+
+bool render_comp_preview(const void* frame, void* hwndV, const CompResult& cr) {
+    if (hwndV == nullptr) {
         return false;
     }
-    BITMAPINFO bmi;
-    ZeroMemory(&bmi, sizeof(bmi));
-    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = cw;
-    bmi.bmiHeader.biHeight = -ch;  // negative = top-down (matches cv::Mat)
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 24;
-    bmi.bmiHeader.biCompression = BI_RGB;
-    // 1:1 blit (dst size == src size -> no scaling). Top-left; black-fill any
-    // border strips (only when the window is larger than the native crop).
-    SetStretchBltMode(dc, COLORONCOLOR);
-    StretchDIBits(dc, 0, 0, cw, ch, 0, 0, cw, ch, work.data, &bmi, DIB_RGB_COLORS, SRCCOPY);
-    auto black = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
-    if (rw > cw) {
-        const RECT s{cw, 0, rw, rh};
-        FillRect(dc, &s, black);
+    HWND hwnd = reinterpret_cast<HWND>(hwndV);
+
+    // Build the overlay first (all OpenCV, no-throw barrier), then blit. Same shape
+    // as render_preview: a throw can't leak the DC, and nothing unwinds across the
+    // C ABI the host calls us through.
+    cv::Mat work;
+    int cw = 0;
+    int ch = 0;
+    int rw = 0;
+    int rh = 0;
+    try {
+        int origin = -1;
+        const cv::Mat wrapped = detail::wrap_ipl(frame, origin);
+        if (wrapped.empty()) {
+            return false;
+        }
+        // Up camera: detection/offset use the UNflipped buffer (calibrated -- our center
+        // matches the original's reported offset, no mirror). But the host DISPLAYS the
+        // up view horizontally mirrored, so mirror the PREVIEW to match it, and map the
+        // overlay through the same flip below so the box still lands on the part.
+        (void)origin;
+        cv::Mat gray;
+        if (wrapped.channels() == 1) {
+            gray = wrapped.clone();
+        } else if (wrapped.channels() == 3) {
+            cv::extractChannel(wrapped, gray, 0);  // mono capture: plane 0 == gray
+        } else {
+            return false;
+        }
+        cv::Mat bgr;
+        cv::cvtColor(gray, bgr, cv::COLOR_GRAY2BGR);
+        cv::flip(bgr, bgr, 1);  // 1 = horizontal mirror, to match the host's up display
+
+        const int W = bgr.cols;
+        const int H = bgr.rows;
+        RECT rc{};
+        GetClientRect(hwnd, &rc);
+        rw = rc.right - rc.left;
+        rh = rc.bottom - rc.top;
+        if (rw <= 0) {
+            rw = W;
+        }
+        if (rh <= 0) {
+            rh = H;
+        }
+
+        // 1:1 native crop centered on the frame center == the nozzle reference (the
+        // part rides the nozzle near center). cw rounded to a multiple of 4 for DIB.
+        const double rx = W / 2.0;
+        const double ry = H / 2.0;
+        cw = std::min(rw, W) & ~3;
+        ch = std::min(rh, H);
+        if (cw < 16 || ch < 16) {
+            return false;
+        }
+        cv::getRectSubPix(bgr, cv::Size(cw, ch),
+                          cv::Point2f(static_cast<float>(rx), static_cast<float>(ry)), work);
+        if (work.type() != CV_8UC3) {
+            return false;
+        }
+        const double cropLeft = rx - cw / 2.0;
+        const double cropTop = ry - ch / 2.0;
+
+        const int RT = 1;
+        // Reference crosshair (red) at the crop center = the nozzle center. The gap to
+        // the green part center is the placement offset the host corrects.
+        const cv::Scalar red(0, 0, 255);
+        cv::line(work, cv::Point(cw / 2, 0), cv::Point(cw / 2, ch), red, RT, cv::LINE_AA);
+        cv::line(work, cv::Point(0, ch / 2), cv::Point(cw, ch / 2), red, RT, cv::LINE_AA);
+
+        // Detected part (green = locked): oriented body box + center cross + a direction
+        // arrow poking past one edge so the rotation reads at a glance (OpenPnP's
+        // DrawRotatedRects style). The preview is horizontally mirrored above, so map the
+        // detection through the same flip: x -> W - cx, and a horizontal mirror negates
+        // the angle (the detector reports it in OpenCV's RotatedRect convention on the
+        // unflipped buffer; validated against captured frames + detection).
+        if (cr.found) {
+            const cv::Scalar green(0, 255, 0);
+            const auto u = static_cast<float>((static_cast<double>(W) - cr.cx) - cropLeft);
+            const auto v = static_cast<float>(cr.cy - cropTop);
+            const cv::RotatedRect rr(cv::Point2f(u, v),
+                                     cv::Size2f(static_cast<float>(cr.w), static_cast<float>(cr.h)),
+                                     static_cast<float>(-cr.angle));
+            std::array<cv::Point2f, 4> p{};
+            rr.points(p.data());
+            for (int i = 0; i < 4; ++i) {
+                cv::line(work, p[i], p[(i + 1) % 4], green, RT, cv::LINE_AA);
+            }
+            // Arrow along the height axis (angle - 90 deg), 1.3x half-height out.
+            const double ma = (-cr.angle - 90.0) * CV_PI / 180.0;
+            const cv::Point center(cvRound(u), cvRound(v));
+            const cv::Point tip(cvRound(u + 1.3 * cr.h / 2.0 * std::cos(ma)),
+                                cvRound(v + 1.3 * cr.h / 2.0 * std::sin(ma)));
+            cv::arrowedLine(work, center, tip, green, RT, cv::LINE_AA, 0, 0.3);
+            cv::drawMarker(work, center, green, cv::MARKER_CROSS, 10, RT, cv::LINE_AA);
+        }
+
+        if (!work.isContinuous()) {
+            work = work.clone();
+        }
+    } catch (...) {
+        return false;
     }
-    if (rh > ch) {
-        const RECT s{0, ch, cw, rh};
-        FillRect(dc, &s, black);
-    }
-    ReleaseDC(hwnd, dc);
-    return true;
+
+    return blit_to_hwnd(hwnd, work, cw, ch, rw, rh);
 }
 
 }  // namespace vis

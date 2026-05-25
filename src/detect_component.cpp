@@ -38,6 +38,7 @@ struct CompParams {
     double angleFineStepDeg = 0.3;
     double minSymQuality = 0.30;    // accept the symmetry result above this; else fall back
     double minFillFallback = 0.45;  // minAreaRect rectangularity floor to call it found
+    double fillCap = 0.92;          // reject a box that spans >=this fraction of the ROI
 };
 constexpr CompParams kComp;
 
@@ -322,6 +323,26 @@ CompResult minarea_fallback(const cv::Mat& g, const cv::Rect& crop,
     return r;
 }
 
+// Stray-detection guard (purely geometric -- the configured part size never reaches
+// the DLL, so we can't size-match; see notes). A real part rides the nozzle, so its
+// center must lie within the search radius of the reference, and a box that spans
+// almost the whole ROI is the detector latching the background/border rather than a
+// discrete part. Rejects the off-nozzle distractors and frame-filling blobs the stock
+// vision locks onto. Angle-agnostic, so it never interferes with the pick-angle /
+// rotation handling.
+bool plausible_part(double cx, double cy, double w, double h,
+                    double refXf, double refYf, int sr, const cv::Rect& crop) {
+    const double dx = cx - refXf;
+    const double dy = cy - refYf;
+    if (dx * dx + dy * dy > static_cast<double>(sr) * static_cast<double>(sr)) {
+        return false;  // off the nozzle -> not the picked part
+    }
+    if (w > kComp.fillCap * crop.width || h > kComp.fillCap * crop.height) {
+        return false;  // box ~= ROI -> background/border latch, not a part
+    }
+    return true;
+}
+
 }  // namespace
 
 CompResult detect_component(const void* frame,
@@ -418,14 +439,16 @@ CompResult detect_component(const void* frame,
             r.quality = std::min(fx.sym, fy.sym);  // weakest axis governs confidence
             r.method = CompResult::Method::Symmetry;
             (void)expectedAngleDeg;  // reserved: narrow the angle search once data exists
-            if (r.quality >= kComp.minSymQuality) {
+            if (!plausible_part(r.cx, r.cy, r.w, r.h, rxF, ryF, sr, crop)) {
+                r.found = false;  // stray (off-nozzle / fills the ROI) -> drop, try fallback
+            } else if (r.quality >= kComp.minSymQuality) {
                 return r;
             }
         }
 
         // --- Fallback: thresholded-silhouette minAreaRect ---
         const CompResult fb = minarea_fallback(g, crop, rxF - crop.x, ryF - crop.y, thr);
-        if (fb.found) {
+        if (fb.found && plausible_part(fb.cx, fb.cy, fb.w, fb.h, rxF, ryF, sr, crop)) {
             CompResult out = fb;
             out.imgW = r.imgW;
             out.imgH = r.imgH;

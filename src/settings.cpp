@@ -12,8 +12,38 @@
 namespace vis {
 namespace {
 std::mutex g_mu;
-std::array<Settings, MODE_COUNT> g_settings;  // indexed by mode; [1..3] used
+std::array<Settings, MODE_COUNT> g_settings;                          // indexed by mode; [1..3] used
+std::array<bool, METHOD_COUNT> g_enabled = {true, true, true, true};  // per-detector master switch
 LiveStatus g_status;
+
+// INI key <-> METHOD_* for the [enable] section.
+const char* method_key(int m) {
+    switch (m) {
+        case METHOD_ROUND:
+            return "round";
+        case METHOD_CIRCULAR:
+            return "circular";
+        case METHOD_TEMPLATE:
+            return "template";
+        default:
+            return "comp";
+    }
+}
+int method_from_key(const std::string& s) {
+    if (s == "round") {
+        return METHOD_ROUND;
+    }
+    if (s == "circular") {
+        return METHOD_CIRCULAR;
+    }
+    if (s == "template") {
+        return METHOD_TEMPLATE;
+    }
+    if (s == "comp") {
+        return METHOD_COMP;
+    }
+    return -1;
+}
 
 std::size_t clamp_mode(int m) {
     return static_cast<std::size_t>((m >= MODE_ROUND && m <= MODE_TEMPLATE) ? m : MODE_ROUND);
@@ -100,6 +130,22 @@ void set_settings(int mode, const Settings& s) {
     g_settings[clamp_mode(mode)] = s;
 }
 
+bool method_enabled(int method) {
+    if (method < 0 || method >= METHOD_COUNT) {
+        return true;  // unknown -> behave as enabled (our detector), never silently off
+    }
+    std::lock_guard<std::mutex> const lk(g_mu);
+    return g_enabled[static_cast<std::size_t>(method)];
+}
+
+void set_method_enabled(int method, bool on) {
+    if (method < 0 || method >= METHOD_COUNT) {
+        return;
+    }
+    std::lock_guard<std::mutex> const lk(g_mu);
+    g_enabled[static_cast<std::size_t>(method)] = on;
+}
+
 LiveStatus get_status() {
     std::lock_guard<std::mutex> const lk(g_mu);
     return g_status;
@@ -118,23 +164,35 @@ void load_settings(const char* path) {
     if (!f) {
         return;
     }
-    std::array<Settings, MODE_COUNT> parsed;  // start from defaults; fill the sections present
+    std::array<Settings, MODE_COUNT> parsed;                             // start from defaults; fill the sections present
+    std::array<bool, METHOD_COUNT> parsedEn = {true, true, true, true};  // default-on
     int cur = MODE_NONE;
+    bool inEnable = false;
     std::string line;
     while (std::getline(f, line)) {
         if (!line.empty() && line.front() == '[') {
             const std::string::size_type rb = line.find(']');
             if (rb != std::string::npos) {
-                cur = mode_from_name(line.substr(1, rb - 1));
+                const std::string sec = line.substr(1, rb - 1);
+                inEnable = (sec == "enable");
+                cur = inEnable ? MODE_NONE : mode_from_name(sec);
+            }
+            continue;
+        }
+        const std::string::size_type eq = line.find('=');
+        if (eq == std::string::npos) {
+            continue;
+        }
+        if (inEnable) {
+            const int mth = method_from_key(line.substr(0, eq));
+            if (mth >= 0) {
+                parsedEn[static_cast<std::size_t>(mth)] =
+                    (std::strtol(line.c_str() + eq + 1, nullptr, 10) != 0);
             }
             continue;
         }
         if (cur == MODE_NONE) {
             continue;  // keys before any [section] are ignored
-        }
-        const std::string::size_type eq = line.find('=');
-        if (eq == std::string::npos) {
-            continue;
         }
         assign_kv(parsed[static_cast<std::size_t>(cur)], line.substr(0, eq),
                   std::strtod(line.c_str() + eq + 1, nullptr));
@@ -143,6 +201,7 @@ void load_settings(const char* path) {
     for (int m = MODE_ROUND; m <= MODE_TEMPLATE; ++m) {
         g_settings[static_cast<std::size_t>(m)] = parsed[static_cast<std::size_t>(m)];
     }
+    g_enabled = parsedEn;
 }
 
 void save_settings(const char* path) {
@@ -150,16 +209,23 @@ void save_settings(const char* path) {
         return;
     }
     std::array<Settings, MODE_COUNT> snap;
+    std::array<bool, METHOD_COUNT> snapEn{};
     {
         std::lock_guard<std::mutex> const lk(g_mu);
         for (int m = MODE_ROUND; m <= MODE_TEMPLATE; ++m) {
             snap[static_cast<std::size_t>(m)] = g_settings[static_cast<std::size_t>(m)];
         }
+        snapEn = g_enabled;
     }
     std::ofstream f(path, std::ios::trunc);
     if (!f) {
         return;
     }
+    f << "[enable]\n";
+    for (int m = 0; m < METHOD_COUNT; ++m) {
+        f << method_key(m) << "=" << (snapEn[static_cast<std::size_t>(m)] ? 1 : 0) << "\n";
+    }
+    f << "\n";
     for (int m = MODE_ROUND; m <= MODE_TEMPLATE; ++m) {
         write_section(f, m, snap[static_cast<std::size_t>(m)]);
     }

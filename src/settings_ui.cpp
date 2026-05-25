@@ -48,7 +48,13 @@ enum : int { ID_TIMER = 1,
              ID_BTN_SAVE = 1100,
              ID_BTN_RESET = 1101,
              ID_BTN_CLOSE = 1102,
-             ID_CHK_MEDIAN = 1103 };
+             ID_CHK_MEDIAN = 1103,
+             // Detector master switches -- consecutive, in METHOD_* order, so
+             // method = id - ID_CHK_ROUND.
+             ID_CHK_ROUND = 1104,
+             ID_CHK_CIRCULAR = 1105,
+             ID_CHK_TEMPLATE = 1106,
+             ID_CHK_COMP = 1107 };
 
 // One slider per tunable. `kind` drives both the value-label format and the
 // Settings <-> trackbar mapping.
@@ -106,6 +112,7 @@ std::array<HWND, S_COUNT> g_tb{};
 std::array<HWND, S_COUNT> g_lblName{};
 std::array<HWND, S_COUNT> g_lblVal{};
 HWND g_chkMedian = nullptr;
+std::array<HWND, METHOD_COUNT> g_chkMethod{};  // Detector on/off boxes, METHOD_* order
 HBRUSH g_brGreen = nullptr, g_brRed = nullptr;
 bool g_lastFound = false;
 int g_curMode = MODE_ROUND;              // which mode's settings the sliders currently edit
@@ -409,12 +416,37 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                               g_inst, nullptr);
 
                 g_lblStatus = make_static(hwnd, " NO LOCK", 12, 394, 396, 42);
+
+                // Detector master switches (GLOBAL, not per-mode): uncheck to fall back
+                // to the stock vision for that method. State persists in the INI [enable]
+                // section on Save. Applied live -- the dispatch checks method_enabled().
+                make_static(hwnd, "- Detectors (uncheck = use stock) -", 12, 442, 320, 16);
+                struct ChkDef {
+                    int id;
+                    int method;
+                    const char* label;
+                };
+                const std::array<ChkDef, METHOD_COUNT> chk = {{
+                    {.id = ID_CHK_ROUND, .method = METHOD_ROUND, .label = "Round  (CheckMark)"},
+                    {.id = ID_CHK_CIRCULAR, .method = METHOD_CIRCULAR, .label = "Circular  (CheckMark2)"},
+                    {.id = ID_CHK_TEMPLATE, .method = METHOD_TEMPLATE, .label = "ImageTemplate  (CheckTemplate)"},
+                    {.id = ID_CHK_COMP, .method = METHOD_COMP, .label = "Component up-vision  (CheckComp)"},
+                }};
+                for (std::size_t i = 0; i < chk.size(); ++i) {
+                    g_chkMethod[i] = CreateWindowExA(
+                        0, "BUTTON", chk[i].label, WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 12,
+                        462 + static_cast<int>(i) * 22, 380, 20, hwnd,
+                        reinterpret_cast<HMENU>(static_cast<INT_PTR>(chk[i].id)), g_inst, nullptr);
+                    SendMessageA(g_chkMethod[i], BM_SETCHECK,
+                                 method_enabled(chk[i].method) ? BST_CHECKED : BST_UNCHECKED, 0);
+                }
+
                 // Center the bottom button row on the ACTUAL client width (computed, not
                 // hard-coded x positions) so it stays centered regardless of width / DPI.
                 constexpr int kBtnW = 80;
                 constexpr int kBtnH = 26;
                 constexpr int kBtnGap = 10;
-                constexpr int kBtnY = 446;
+                constexpr int kBtnY = 558;
                 constexpr int kNBtn = 3;
                 RECT cr{};
                 GetClientRect(hwnd, &cr);
@@ -466,6 +498,11 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     ShowWindow(hwnd, SW_HIDE);
                 } else if (id == ID_CHK_MEDIAN) {
                     apply_from_controls();  // checkbox toggled
+                } else if (id >= ID_CHK_ROUND && id <= ID_CHK_COMP) {
+                    const int method = id - ID_CHK_ROUND;  // METHOD_* order matches the ID order
+                    const bool on = SendMessageA(g_chkMethod[static_cast<std::size_t>(method)],
+                                                 BM_GETCHECK, 0, 0) == BST_CHECKED;
+                    set_method_enabled(method, on);  // live; persists in the INI on Save
                 }
                 return 0;
             }
@@ -487,7 +524,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 void create_window() {
     const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
     const DWORD ex = WS_EX_TOPMOST | WS_EX_TOOLWINDOW;
-    RECT wr{0, 0, 420, 482};
+    RECT wr{0, 0, 420, 600};
     AdjustWindowRectEx(&wr, style, FALSE, ex);
     // Activate the v6 context around creation so this window AND the child controls
     // it makes in WM_CREATE render themed.

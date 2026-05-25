@@ -46,6 +46,18 @@ enum { MODE_NONE = 0,
 Settings get_settings(int mode);
 void set_settings(int mode, const Settings& s);
 
+// Per-detector master switches: run OUR detector (true = default) or pass the call
+// straight through to the original DLL (false). Global (not per-mode), exposed as the
+// "Detectors" checkboxes in the settings UI and persisted in the INI [enable] section.
+// Lets the operator fall back to the stock vision per method without reinstalling.
+enum { METHOD_ROUND = 0,     // CheckMark    (Round / circular-symmetry)
+       METHOD_CIRCULAR = 1,  // CheckMark2   (Circular / Hough)
+       METHOD_TEMPLATE = 2,  // CheckTemplate (ImageTemplate)
+       METHOD_COMP = 3,      // CheckComp    (up-vision component)
+       METHOD_COUNT = 4 };
+bool method_enabled(int method);  // default true; out-of-range -> true
+void set_method_enabled(int method, bool on);
+
 // Persistence: an INI with one [round]/[circular]/[template] section per mode. load
 // is a no-op if the file is absent/unreadable, so a fresh install runs on defaults.
 void load_settings(const char* path);

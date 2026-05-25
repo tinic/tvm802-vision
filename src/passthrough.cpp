@@ -468,7 +468,8 @@ void* __stdcall QueryFrame(void* cam, int timeout) {
 int __stdcall CheckComp(void* f, int hwnd, int w, int h) {
     // Sentinel gate: inert unless the operator opts in. A released DLL carries the
     // prototype but does nothing up-vision until C:\mvision_capture\comp is created.
-    if (!cap::comp_enabled()) {
+    // The "Component" UI checkbox is an additional off switch (default on).
+    if (!cap::comp_enabled() || !vis::method_enabled(vis::METHOD_COMP)) {
         g_resultSrc = ResultSrc::Original;
         return mv::orig::CheckComp(f, hwnd, w, h);
     }
@@ -503,7 +504,7 @@ int __stdcall CheckComp(void* f, int hwnd, int w, int h) {
     if constexpr (kCompDrive) {
         if (cr.found) {
             set_our_comp_result(cr);             // our pose drives via comp-mode GetOffset
-            mv::orig::CheckComp(f, hwnd, w, h);  // original called for its preview only
+            mv::orig::CheckComp(f, hwnd, w, h);  // original: result for the log + render fallback
             rc = 0;
         } else {
             g_resultSrc = ResultSrc::Original;  // our miss -> original drives
@@ -513,6 +514,10 @@ int __stdcall CheckComp(void* f, int hwnd, int w, int h) {
         g_resultSrc = ResultSrc::Original;  // shadow mode: original drives
         rc = mv::orig::CheckComp(f, hwnd, w, h);
     }
+    // Render OUR component overlay (oriented box + direction arrow, green on lock),
+    // drawn in OpenCV and blitted over whatever the original rendered above. If ours
+    // fails it returns false and the original's render is already on screen.
+    vis::render_comp_preview(f, reinterpret_cast<void*>(static_cast<intptr_t>(hwnd)), cr);
     maybe_log_comp(f, cr);
     return rc;
 }
@@ -539,8 +544,8 @@ void* __stdcall DownShow(void* f) {
 // CheckMark2). Other algo values (-1 preview-only, legacy shape modes) pass
 // through. r = strength (unused by the Round detector).
 int __stdcall CheckMark(void* f, int hwnd, int w, int h, int algo, int r) {
-    if (algo != 0) {
-        g_resultSrc = ResultSrc::Original;
+    if (algo != 0 || !vis::method_enabled(vis::METHOD_ROUND)) {
+        g_resultSrc = ResultSrc::Original;  // not Round, or operator disabled our Round detector
         return mv::orig::CheckMark(f, hwnd, w, h, algo, r);
     }
     // Circular-symmetry DRIVES placement (shadow-validated on hardware: matched/
@@ -559,6 +564,10 @@ int __stdcall CheckMark(void* f, int hwnd, int w, int h, int algo, int r) {
 // invoked only as a preview fallback (run_mark_check). CheckMark2 args:
 // algo = template size px (from the 1.2mm setting), r = strength.
 int __stdcall CheckMark2(void* f, int hwnd, int w, int h, int algo, int r) {
+    if (!vis::method_enabled(vis::METHOD_CIRCULAR)) {
+        g_resultSrc = ResultSrc::Original;  // operator disabled our Circular detector
+        return mv::orig::CheckMark2(f, hwnd, w, h, algo, r);
+    }
     return run_mark_check(f, hwnd, "CheckMark2", algo, r, [&](double refX, double refY, int searchR) { return vis::detect_circle_mark(f, algo, refX, refY, searchR); }, [&] { mv::orig::CheckMark2(f, hwnd, w, h, algo, r); });
 }
 
@@ -573,6 +582,10 @@ int __stdcall GetTemplate(void* f, unsigned char* out, int sz, double p) {
 // render fails.
 int __stdcall CheckTemplate(void* f, int hwnd, int w, int h, unsigned char* t, int sz, double th, int m) {
     cache_template(t, sz);  // store the latest template (no-op on null/unchanged)
+    if (!vis::method_enabled(vis::METHOD_TEMPLATE)) {
+        g_resultSrc = ResultSrc::Original;  // operator disabled our ImageTemplate detector
+        return mv::orig::CheckTemplate(f, hwnd, w, h, t, sz, th, m);
+    }
     return run_mark_check(f, hwnd, "CheckTemplate", sz, m, [&](double refX, double refY, int searchR) {
             vis::MarkResult mr;
             if (g_tmpl.sz > 0) {

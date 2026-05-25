@@ -156,4 +156,14 @@ bool save_frame(const void* frame, const char* path);
 bool render_preview(const void* frame, void* hwnd, double mvoX, double mvoY,
                     int searchRadiusPx, const MarkResult& mr);
 
+// Render the up-vision component preview ourselves (replaces the original
+// CheckComp's rendering): a 1:1 crop centered on the frame center (the nozzle
+// reference) with a red reference crosshair and, when the part is found, an
+// OpenPnP-style green overlay -- the oriented body box, a center cross, and a
+// direction arrow poking out one edge so the rotation is obvious. All graphics
+// are drawn in OpenCV; only the final blit touches GDI (shared with
+// render_preview). Returns false on any failure so the caller can fall back to
+// the original. NON-DESTRUCTIVE on the frame buffer.
+bool render_comp_preview(const void* frame, void* hwnd, const CompResult& cr);
+
 }  // namespace vis
