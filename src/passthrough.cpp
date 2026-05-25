@@ -120,17 +120,15 @@ double g_compExpA = std::numeric_limits<double>::quiet_NaN();  // expected angle
 int g_compThreshold = 0;                                       // Comp Threshold (SetThreshold); 0 = detector default
 double g_upoX = 0.0, g_upoY = 0.0;                             // up-vision offset (px), SetUpVisionOffsetXY
 
-// Up-vision GetOffset packing (CALIBRATION-PENDING). CheckComp packs X/Y=offset,
-// W/H=detected SIZE, A=angle. The exact transform -- px<->host-units scale, the
-// mirror sign (the up camera flips the frame), and the angle sign -- is calibrated
-// from the shadow log (our detection vs the original's logged X/Y/W/H/A on the same
-// frame). These are the documented best-guess starting points and MUST be confirmed
-// before kCompDrive is set true. See re/UP-VISION-PLAN.md (private).
-constexpr double kUpScale = 1.0 / 1.5;  // px -> host units (down divides by 1.5; up's
-                                        // factor is unverified) -- TODO calibrate
-constexpr bool kUpMirrorX = true;       // up camera horizontal mirror -- TODO confirm
-constexpr bool kUpMirrorY = false;      // up camera vertical mirror   -- TODO confirm
-constexpr double kUpAngleSign = -1.0;   // native negates the box angle -- TODO confirm
+// Up-vision GetOffset packing (CALIBRATED 2026-05-25 against the original's GetOffset
+// on shared shadow frames: 551 found reads across 3 operating points / offsets /
+// angles). The comp packing is the MIRROR of the down-mark one: GetOffset x/y =
+// component SIZE (px), w/h = center OFFSET from the frame center (px), a = angle (deg).
+// Everything is raw pixels -- scale 1.0 (the host applies its own px<->mm downstream),
+// NO camera mirror, angle sign +1 (CCW+, same handedness as ours). The fit was tight:
+// offset matched the original to <0.4 px and angle to <0.5 deg over a 32 deg rotation.
+constexpr double kUpScale = 1.0;      // size + offset are reported in raw pixels
+constexpr double kUpAngleSign = 1.0;  // angle handedness matches ours -- no flip
 
 // SHADOW by default: our component detector runs read-only alongside the original,
 // which keeps DRIVING placement; both results are logged (when capture is armed) so
@@ -170,19 +168,17 @@ void set_our_result(const vis::MarkResult& mr) {
     g_resultSrc = ResultSrc::Mark;
 }
 
-// Pack an up-vision component pose into the comp GetOffset fields (X/Y=offset,
-// W/H=size, A=angle). Calibration-pending (see the kUp* constants); only reached
-// when kCompDrive is true.
+// Pack an up-vision component pose into the comp GetOffset fields: x/y = component
+// SIZE, w/h = center OFFSET from the frame center, a = angle (see the kUp*
+// calibration above). Only reached when kCompDrive is true.
 void set_our_comp_result(const vis::CompResult& cr) {
     const double cxC = cr.imgW / 2.0;
     const double cyC = cr.imgH / 2.0;
-    const double dx = kUpMirrorX ? (cxC - cr.cx) : (cr.cx - cxC);
-    const double dy = kUpMirrorY ? (cyC - cr.cy) : (cr.cy - cyC);
-    g_compX = dx * kUpScale;
-    g_compY = dy * kUpScale;
-    g_compW = cr.w * kUpScale;
-    g_compH = cr.h * kUpScale;
-    g_compA = kUpAngleSign * cr.angle;
+    g_compX = cr.w * kUpScale;           // GetOffset x = component size W
+    g_compY = cr.h * kUpScale;           // GetOffset y = component size H
+    g_compW = (cr.cx - cxC) * kUpScale;  // GetOffset w = center offset X
+    g_compH = (cr.cy - cyC) * kUpScale;  // GetOffset h = center offset Y
+    g_compA = kUpAngleSign * cr.angle;   // GetOffset a = angle (deg)
     // quality (higher=better) -> min_val (0=best). Plain clamp, NOT std::max: this TU
     // includes <windows.h>, whose max() macro mangles std::max(...).
     const double q = 1.0 - cr.quality;
@@ -639,7 +635,7 @@ void __stdcall GetOffset(double* x, double* y, double* w, double* h, double* a) 
             *h = g_ourH;
             *a = 0.0;
             break;
-        case ResultSrc::Comp:  // up-vision: X/Y=offset, W/H=size, A=angle
+        case ResultSrc::Comp:  // up-vision: X/Y=size, W/H=offset, A=angle
             *x = g_compX;
             *y = g_compY;
             *w = g_compW;
