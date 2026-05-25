@@ -61,6 +61,62 @@ bool blit_to_hwnd(HWND hwnd, const cv::Mat& work, int cw, int ch, int rw, int rh
     return true;
 }
 
+// Draw 0.25 mm tick marks along the centered crosshair from a camera's px/mm scale
+// (anisotropic: X scale spaces the horizontal ticks, Y the vertical). Length tiers
+// 1.0 mm > 0.5 mm > 0.25 mm. No-op until the controller scale read has landed. Shared
+// by the down (down_cam_scale) and up (up_cam_scale) previews.
+void draw_mm_ticks(cv::Mat& work, int cw, int ch, const CamScale& sc, int thickness) {
+    if (!sc.valid || sc.xMmPerPx <= 0.0 || sc.yMmPerPx <= 0.0) {
+        return;
+    }
+    const cv::Scalar red(0, 0, 255);
+    const int cxp = cw / 2;
+    const int cyp = ch / 2;
+    const double pxQX = 0.25 / sc.xMmPerPx;  // px per 0.25 mm, horizontal
+    const double pxQY = 0.25 / sc.yMmPerPx;  // px per 0.25 mm, vertical
+    const auto tick_len = [](int n) { return (n % 4 == 0) ? 9 : (n % 2 == 0) ? 6
+                                                                             : 3; };
+    for (int n = 1; n < 1000; ++n) {
+        const int d = static_cast<int>(std::lround(n * pxQX));
+        if (cxp - d < 0 && cxp + d >= cw) {
+            break;
+        }
+        const int len = tick_len(n);
+        for (int sgn = -1; sgn <= 1; sgn += 2) {
+            const int x = cxp + sgn * d;
+            if (x >= 0 && x < cw) {
+                cv::line(work, cv::Point(x, cyp - len), cv::Point(x, cyp + len), red, thickness, cv::LINE_AA);
+            }
+        }
+    }
+    for (int n = 1; n < 1000; ++n) {
+        const int d = static_cast<int>(std::lround(n * pxQY));
+        if (cyp - d < 0 && cyp + d >= ch) {
+            break;
+        }
+        const int len = tick_len(n);
+        for (int sgn = -1; sgn <= 1; sgn += 2) {
+            const int y = cyp + sgn * d;
+            if (y >= 0 && y < ch) {
+                cv::line(work, cv::Point(cxp - len, y), cv::Point(cxp + len, y), red, thickness, cv::LINE_AA);
+            }
+        }
+    }
+}
+
+// "Ctrl+Alt+M: settings" discoverability hint, top-right (black outline + light fill so
+// it reads on any background). Clear of the host's bottom stats + top-left Switch button.
+void draw_settings_hint(cv::Mat& work, int cw) {
+    const char* hint = "Ctrl+Alt+M: settings";
+    int baseline = 0;
+    const cv::Size ts = cv::getTextSize(hint, cv::FONT_HERSHEY_SIMPLEX, 0.4, 1, &baseline);
+    int hx = cw - ts.width - 6;
+    hx = std::max(hx, 6);
+    const cv::Point at(hx, ts.height + 6);
+    cv::putText(work, hint, at, cv::FONT_HERSHEY_SIMPLEX, 0.4, cv::Scalar(0, 0, 0), 2, cv::LINE_AA);
+    cv::putText(work, hint, at, cv::FONT_HERSHEY_SIMPLEX, 0.4, cv::Scalar(210, 210, 210), 1, cv::LINE_AA);
+}
+
 }  // namespace
 
 bool render_preview(const void* frame, void* hwndV, double mvoX, double mvoY,
@@ -160,45 +216,8 @@ bool render_preview(const void* frame, void* hwndV, double mvoX, double mvoY,
             cv::circle(work, cv::Point(cw / 2, ch / 2), searchRadiusPx, cv::Scalar(0, 0, 255), RT, cv::LINE_AA);
         }
 
-        // Tick marks along the crosshair every 0.25 mm, from the controller's px/mm
-        // scale (down camera — this preview is the down-vision mark modes). Anisotropic:
-        // the X scale spaces the horizontal axis, Y the vertical. Length hierarchy:
-        // 1.0 mm > 0.5 mm > 0.25 mm. Absent until the background controller read lands.
-        if (const CamScale sc = down_cam_scale(); sc.valid && sc.xMmPerPx > 0.0 && sc.yMmPerPx > 0.0) {
-            const cv::Scalar red(0, 0, 255);
-            const int cxp = cw / 2;
-            const int cyp = ch / 2;
-            const double pxQX = 0.25 / sc.xMmPerPx;  // px per 0.25 mm, horizontal
-            const double pxQY = 0.25 / sc.yMmPerPx;  // px per 0.25 mm, vertical
-            auto tick_len = [](int n) { return (n % 4 == 0) ? 9 : (n % 2 == 0) ? 6
-                                                                               : 3; };
-            for (int n = 1; n < 1000; ++n) {
-                const int d = static_cast<int>(std::lround(n * pxQX));
-                if (cxp - d < 0 && cxp + d >= cw) {
-                    break;
-                }
-                const int len = tick_len(n);  // 1.0 / 0.5 / 0.25 mm
-                for (int sgn = -1; sgn <= 1; sgn += 2) {
-                    const int x = cxp + sgn * d;
-                    if (x >= 0 && x < cw) {
-                        cv::line(work, cv::Point(x, cyp - len), cv::Point(x, cyp + len), red, RT, cv::LINE_AA);
-                    }
-                }
-            }
-            for (int n = 1; n < 1000; ++n) {
-                const int d = static_cast<int>(std::lround(n * pxQY));
-                if (cyp - d < 0 && cyp + d >= ch) {
-                    break;
-                }
-                const int len = tick_len(n);
-                for (int sgn = -1; sgn <= 1; sgn += 2) {
-                    const int y = cyp + sgn * d;
-                    if (y >= 0 && y < ch) {
-                        cv::line(work, cv::Point(cxp - len, y), cv::Point(cxp + len, y), red, RT, cv::LINE_AA);
-                    }
-                }
-            }
-        }
+        // Tick marks along the crosshair every 0.25 mm (down-camera px/mm scale).
+        draw_mm_ticks(work, cw, ch, down_cam_scale(), RT);
 
         // Our detection (green) mapped from frame coords into crop coords. The
         // overlay style depends on the mode: a square for ImageTemplate (the
@@ -218,19 +237,7 @@ bool render_preview(const void* frame, void* hwndV, double mvoX, double mvoY,
             cv::drawMarker(work, cv::Point(u, v), green, cv::MARKER_CROSS, 14, 1, cv::LINE_AA);
         }
 
-        // Discoverability hint for the settings dialog (black outline + light text so
-        // it reads on any background). TOP-RIGHT, clear of the host's stats overlay
-        // (bottom) and the "Switch" camera button (top-left).
-        {
-            const char* hint = "Ctrl+Alt+M: settings";
-            int baseline = 0;
-            const cv::Size ts = cv::getTextSize(hint, cv::FONT_HERSHEY_SIMPLEX, 0.4, 1, &baseline);
-            int hx = cw - ts.width - 6;
-            hx = std::max(hx, 6);
-            const cv::Point at(hx, ts.height + 6);
-            cv::putText(work, hint, at, cv::FONT_HERSHEY_SIMPLEX, 0.4, cv::Scalar(0, 0, 0), 2, cv::LINE_AA);
-            cv::putText(work, hint, at, cv::FONT_HERSHEY_SIMPLEX, 0.4, cv::Scalar(210, 210, 210), 1, cv::LINE_AA);
-        }
+        draw_settings_hint(work, cw);  // "Ctrl+Alt+M: settings" hint, top-right
 
         if (!work.isContinuous()) {
             work = work.clone();
@@ -315,6 +322,8 @@ bool render_comp_preview(const void* frame, void* hwndV, const CompResult& cr) {
         const cv::Scalar red(0, 0, 255);
         cv::line(work, cv::Point(cw / 2, 0), cv::Point(cw / 2, ch), red, RT, cv::LINE_AA);
         cv::line(work, cv::Point(0, ch / 2), cv::Point(cw, ch / 2), red, RT, cv::LINE_AA);
+        // 0.25 mm tick marks along the crosshair, from the UP-camera px/mm scale.
+        draw_mm_ticks(work, cw, ch, up_cam_scale(), RT);
 
         // Detected part (green = locked): oriented body box + center cross + a direction
         // arrow poking past one edge so the rotation reads at a glance (OpenPnP's
@@ -344,6 +353,8 @@ bool render_comp_preview(const void* frame, void* hwndV, const CompResult& cr) {
             cv::arrowedLine(work, center, tip, green, RT, cv::LINE_AA, 0, 0.3);
             cv::drawMarker(work, center, green, cv::MARKER_CROSS, 10, RT, cv::LINE_AA);
         }
+
+        draw_settings_hint(work, cw);  // "Ctrl+Alt+M: settings" hint, top-right
 
         if (!work.isContinuous()) {
             work = work.clone();

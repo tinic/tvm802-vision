@@ -47,10 +47,13 @@ preview, and forwards everything else to the original — which you rename to
   operator enables it). A rectilinear-symmetry detector (center + size + angle) with a
   minimum-area-rectangle fallback for asymmetric parts; the pose-to-host transform is
   calibrated against the original DLL over hundreds of real reads. It tracks parts to
-  sub-pixel, ignores the off-nozzle distractors the stock vision locks onto, and renders
-  its own oriented overlay (green body box + direction arrow). Live tuning shares the
-  `Ctrl+Alt+M` dialog (pick **Component** from the mode dropdown). Per-detector on/off
-  checkboxes let an operator fall any method back to the stock vision.
+  sub-pixel, ignores the off-nozzle distractors the stock vision locks onto, and is
+  **field-aware** — it detects on the newest single field when the part is rotating in
+  flight (no interlace comb), woven full-res when settled. It renders its own oriented
+  overlay (green body box + direction arrow, mm tick marks, settings hint) matching the
+  down view. Live tuning shares the `Ctrl+Alt+M` dialog (pick **Component** from the mode
+  dropdown). Per-detector on/off checkboxes let an operator fall any method back to the
+  stock vision.
   - [ ] **Known gap:** when no part is on the nozzle (e.g. dropped in flight), it does
     not yet *reject* the placement — it falls back to the stock detector. A clean reject
     needs the host's internal nozzle-calibration, which isn't exposed; tracked for future

@@ -382,6 +382,13 @@ CompResult detect_component(const void* frame,
             gray = wrapped;
         }
 
+        // Interlace handling: detect on the sharp woven frame when settled, but on the
+        // newest single-instant field when the part is moving (e.g. rotating during
+        // Accurate convergence) -- a combed frame otherwise corrupts the angle and edges.
+        // cyCorrection maps a field-row cy back to full-frame y (added to the result).
+        double cyCorrection = 0.0;
+        gray = motion_aware_gray(gray, &cyCorrection);
+
         // Live tuning from the settings UI ("Component" mode). Every field is a no-op
         // at its neutral value, so an unconfigured machine runs exactly on the defaults.
         const Settings cfg = get_settings(MODE_COMP);
@@ -460,7 +467,7 @@ CompResult detect_component(const void* frame,
 
             r.found = true;
             r.cx = xo + crop.x;
-            r.cy = yo + crop.y;
+            r.cy = yo + crop.y + cyCorrection;
             r.w = w;
             r.h = h;
             r.angle = angle;
@@ -478,6 +485,7 @@ CompResult detect_component(const void* frame,
         const CompResult fb = minarea_fallback(g, crop, rxF - crop.x, ryF - crop.y, thr);
         if (fb.found && plausible_part(fb.cx, fb.cy, fb.w, fb.h, rxF, ryF, sr, crop, cfg.radiusMaxPx)) {
             CompResult out = fb;
+            out.cy += cyCorrection;  // field-row -> full-frame y
             out.imgW = r.imgW;
             out.imgH = r.imgH;
             out.imgOrigin = r.imgOrigin;

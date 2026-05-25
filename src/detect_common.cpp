@@ -318,4 +318,47 @@ MarkResult detect_with_fields(
     return r;
 }
 
+cv::Mat motion_aware_gray(const cv::Mat& gray, double* cyCorrection) {
+    *cyCorrection = 0.0;
+    if (gray.rows < 4 || gray.cols < 4 || gray.type() != CV_8UC1) {
+        return gray;  // can't split / not single-channel -> woven as-is
+    }
+    // Interlace comb / motion metric over the central region (where the part rides the
+    // nozzle): fraction of "zigzag" pixels deviating from both vertical neighbours the
+    // same way == the two ~1/60s fields are misaligned == moving. Same metric as
+    // detect_with_fields.
+    const int cx0 = std::max(1, gray.cols / 2 - 150);
+    const int cx1 = std::min(gray.cols - 1, gray.cols / 2 + 150);
+    const int cy0 = std::max(1, gray.rows / 2 - 120);
+    const int cy1 = std::min(gray.rows - 1, gray.rows / 2 + 120);
+    int comb = 0;
+    int total = 0;
+    for (int y = cy0; y < cy1; ++y) {
+        const auto* rm = gray.ptr<uchar>(y);
+        const auto* ra = gray.ptr<uchar>(y - 1);
+        const auto* rb = gray.ptr<uchar>(y + 1);
+        for (int x = cx0; x < cx1; ++x) {
+            const int d1 = static_cast<int>(rm[x]) - static_cast<int>(ra[x]);
+            const int d2 = static_cast<int>(rm[x]) - static_cast<int>(rb[x]);
+            if (d1 * d2 > kCombPixThresh) {
+                ++comb;
+            }
+            ++total;
+        }
+    }
+    const double combFrac = (total > 0) ? static_cast<double>(comb) / static_cast<double>(total) : 0.0;
+    if (combFrac <= kCombMovingFrac) {
+        return gray;  // settled -> sharp woven frame (best edges for the symmetry fit)
+    }
+    // Moving -> the newest single-instant field (even rows 0,2,4 = most recent, BFF),
+    // bobbed back to full height with CUBIC (preserves edge sharpness). No comb. The
+    // even field samples rows 2i, so a detected cy maps to full-frame with -0.5.
+    const size_t step = gray.step[0];
+    const cv::Mat evenF(gray.rows / 2, gray.cols, gray.type(), gray.data, step * 2);
+    cv::Mat evenU;
+    cv::resize(evenF, evenU, cv::Size(gray.cols, gray.rows), 0, 0, cv::INTER_CUBIC);
+    *cyCorrection = -0.5;
+    return evenU;
+}
+
 }  // namespace vis

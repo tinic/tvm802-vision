@@ -21,6 +21,15 @@ MarkResult detect_with_fields(const void* frame,
                               const std::function<MarkResult(const cv::Mat&)>& perField,
                               bool wovenWhenSettled = false);
 
+// Interlace-aware source selection for "woven-when-settled" detectors that own their
+// own ROI/crop (e.g. up-vision CheckComp) and so can't use detect_with_fields. Given
+// the full woven gray, returns the image to detect on: the sharp woven frame when the
+// scene is settled, else the newest single-instant field bobbed to full height (no
+// interlace comb under motion -- e.g. a part rotating during placement). *cyCorrection
+// is the value to ADD to a detected cy to map field-row space back to full-frame y
+// (0 for the woven frame, -0.5 for the newest field). NON-DESTRUCTIVE on `gray`.
+cv::Mat motion_aware_gray(const cv::Mat& gray, double* cyCorrection);
+
 struct Settings;  // settings.h
 
 // Apply the image adjustments (gamma / levels / brightness / contrast / sharpen)
