@@ -109,7 +109,7 @@ static MarkResult detect_one_field_circle(const cv::Mat& gFull, int minRfull, in
     for (size_t i = 0; i < circles.size(); ++i) {
         const double dx = circles[i][0] - cxRef;
         const double dy = circles[i][1] - cyRef;
-        const double d = dx * dx + dy * dy;
+        const double d = std::fma(dx, dx, dy * dy);
         if (d < bestD) {
             bestD = d;
             best = static_cast<int>(i);
@@ -124,7 +124,7 @@ static MarkResult detect_one_field_circle(const cv::Mat& gFull, int minRfull, in
     if (searchRadiusPx > 0) {
         const double ddx = fx - cxRef;
         const double ddy = fy - cyRef;
-        if (ddx * ddx + ddy * ddy > static_cast<double>(searchRadiusPx) * searchRadiusPx) {
+        if (std::fma(ddx, ddx, ddy * ddy) > static_cast<double>(searchRadiusPx) * searchRadiusPx) {
             return r;
         }
     }
@@ -141,10 +141,10 @@ static MarkResult detect_one_field_circle(const cv::Mat& gFull, int minRfull, in
             const double a = 2.0 * CV_PI * k / N;
             const double ca = std::cos(a);
             const double sa = std::sin(a);
-            const int xin = cvRound(fx + (fr - kCircle.circRingDelta) * ca);
-            const int yin = cvRound(fy + (fr - kCircle.circRingDelta) * sa);
-            const int xou = cvRound(fx + (fr + kCircle.circRingDelta) * ca);
-            const int you = cvRound(fy + (fr + kCircle.circRingDelta) * sa);
+            const int xin = cvRound(std::fma(fr - kCircle.circRingDelta, ca, fx));
+            const int yin = cvRound(std::fma(fr - kCircle.circRingDelta, sa, fy));
+            const int xou = cvRound(std::fma(fr + kCircle.circRingDelta, ca, fx));
+            const int you = cvRound(std::fma(fr + kCircle.circRingDelta, sa, fy));
             if (xin < 0 || yin < 0 || xin >= det.cols || yin >= det.rows) {
                 continue;
             }
@@ -176,7 +176,7 @@ static MarkResult detect_one_field_circle(const cv::Mat& gFull, int minRfull, in
                 if (xx < 0 || yy < 0 || xx >= det.cols || yy >= det.rows) {
                     continue;
                 }
-                const double d2 = static_cast<double>(dx) * dx + static_cast<double>(dy) * dy;
+                const double d2 = std::fma(static_cast<double>(dx), dx, static_cast<double>(dy) * dy);
                 if (d2 < kCircle.contrastInnerFrac * rr * rr) {
                     sin_ += det.at<uchar>(yy, xx);
                     ++nin;

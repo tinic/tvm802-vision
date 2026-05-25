@@ -112,7 +112,7 @@ void apply_image_adjustments(cv::Mat& g, const Settings& s) {
                 v += bri;
             }
             if (doCon) {
-                v = (v - 0.5) * s.contrast + 0.5;
+                v = std::fma(v - 0.5, s.contrast, 0.5);
             }
             v = std::clamp(v, 0.0, 1.0);  // clamped -> lround fits 0..255
             lut[static_cast<size_t>(i)] = static_cast<uchar>(std::lround(v * 255.0));
@@ -297,7 +297,7 @@ MarkResult detect_with_fields(
             if (re.found && ro.found) {
                 const double dx = re.cx - ro.cx;
                 const double dy = re.cy - ro.cy;
-                if (dx * dx + dy * dy <= kSettleAgreePx * kSettleAgreePx) {
+                if (std::fma(dx, dx, dy * dy) <= kSettleAgreePx * kSettleAgreePx) {
                     r.found = true;
                     r.cx = 0.5 * (re.cx + ro.cx);
                     r.cy = 0.5 * (re.cy + ro.cy);

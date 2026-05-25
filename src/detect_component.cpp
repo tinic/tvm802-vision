@@ -51,7 +51,7 @@ double parabolic(const std::vector<float>& v, int i) {
     const auto a = static_cast<double>(v[static_cast<size_t>(i) - 1]);
     const auto b = static_cast<double>(v[static_cast<size_t>(i)]);
     const auto c = static_cast<double>(v[static_cast<size_t>(i) + 1]);
-    const double den = a - 2.0 * b + c;
+    const double den = std::fma(-2.0, b, a + c);
     if (std::abs(den) < 1e-9) {
         return static_cast<double>(i);
     }
@@ -204,7 +204,7 @@ double best_angle(const cv::Mat& roi) {
     double bestScore = -1.0;
     const int nCoarse = static_cast<int>(std::lround(2.0 * kComp.angleSpanDeg / kComp.angleCoarseStepDeg));
     for (int i = 0; i <= nCoarse; ++i) {
-        const double deg = -kComp.angleSpanDeg + static_cast<double>(i) * kComp.angleCoarseStepDeg;
+        const double deg = std::fma(static_cast<double>(i), kComp.angleCoarseStepDeg, -kComp.angleSpanDeg);
         const double s = score_at(deg);
         if (s > bestScore) {
             bestScore = s;
@@ -215,7 +215,7 @@ double best_angle(const cv::Mat& roi) {
     double refineScore = bestScore;
     const int nFine = static_cast<int>(std::lround(2.0 * kComp.angleCoarseStepDeg / kComp.angleFineStepDeg));
     for (int i = 0; i <= nFine; ++i) {
-        const double deg = bestDeg - kComp.angleCoarseStepDeg + static_cast<double>(i) * kComp.angleFineStepDeg;
+        const double deg = std::fma(static_cast<double>(i), kComp.angleFineStepDeg, bestDeg - kComp.angleCoarseStepDeg);
         const double s = score_at(deg);
         if (s > refineScore) {
             refineScore = s;
@@ -290,7 +290,7 @@ CompResult minarea_fallback(const cv::Mat& g, const cv::Rect& crop,
         const double cyr = m.m01 / m.m00;
         const double dx = cxr - refXroi;
         const double dy = cyr - refYroi;
-        const double score = area / (1.0 + std::sqrt(dx * dx + dy * dy));
+        const double score = area / (1.0 + std::sqrt(std::fma(dx, dx, dy * dy)));
         if (score > bestScore) {
             bestScore = score;
             best = static_cast<int>(i);
@@ -395,8 +395,8 @@ CompResult detect_component(const void* frame,
             cv::invertAffineTransform(M, Minv);
             const double xr = fx.center;
             const double yr = fy.center;
-            const double xo = Minv.at<double>(0, 0) * xr + Minv.at<double>(0, 1) * yr + Minv.at<double>(0, 2);
-            const double yo = Minv.at<double>(1, 0) * xr + Minv.at<double>(1, 1) * yr + Minv.at<double>(1, 2);
+            const double xo = std::fma(Minv.at<double>(0, 0), xr, std::fma(Minv.at<double>(0, 1), yr, Minv.at<double>(0, 2)));
+            const double yo = std::fma(Minv.at<double>(1, 0), xr, std::fma(Minv.at<double>(1, 1), yr, Minv.at<double>(1, 2)));
 
             double w = fx.size;
             double h = fy.size;

@@ -110,7 +110,7 @@ static MarkResult detect_one_field_contour(const cv::Mat& gFull, double refX, do
         }
         const double dx = ec.x - cxRef;
         const double dy = ec.y - cyRef;
-        const double dist2 = dx * dx + dy * dy;
+        const double dist2 = std::fma(dx, dx, dy * dy);
         const auto srd = static_cast<double>(searchRadiusPx);
         if (searchRadiusPx > 0 && dist2 > srd * srd) {
             continue;  // search-area gate
