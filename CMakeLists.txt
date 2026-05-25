@@ -95,6 +95,7 @@ if(_build_dll)
         src/settings_ui.cpp
         src/preview.cpp
         src/controller.cpp
+        src/thread_pool.cpp
     )
 
     # Build one MVision.dll. use_avx2=ON emits AVX2+FMA in OUR translation units
@@ -147,7 +148,8 @@ if(BUILD_TESTS)
         src/detect_template.cpp
         src/detect_symmetry.cpp
         src/detect_component.cpp
-        src/settings.cpp)
+        src/settings.cpp
+        src/thread_pool.cpp)
     target_include_directories(mvision_detect_test PRIVATE src)
     target_link_libraries(mvision_detect_test PRIVATE ${OpenCV_LIBS} Threads::Threads)
     target_compile_definitions(mvision_detect_test PRIVATE _CRT_SECURE_NO_WARNINGS)

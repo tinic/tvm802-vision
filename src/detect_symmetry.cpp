@@ -2,6 +2,7 @@
 
 #include "detect_common.h"
 #include "settings.h"
+#include "thread_pool.h"
 
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
@@ -100,18 +101,21 @@ MarkResult detect_one_field_csym(const cv::Mat& gFull, const CircularSymmetry& s
         double x = 0.0, y = 0.0, s = -1.0, e = 0.0;
     };
 
-    // --- Coarse localization: grid over the Range disc, with subsampled
-    //     rings/points (full density only in the fine refine below). SERIAL on
-    //     purpose: profiling showed parallelizing this sub-millisecond per-field
-    //     search across the MSVC OpenCV ConcRT pool cost far more in scheduler
-    //     overhead (VirtualProcessor / SchedulingNode / KiSwapThread /
-    //     KeYieldExecution) than the work itself -- net-negative here. ---
+    // --- Coarse localization: grid over the Range disc, with subsampled rings/points
+    //     (full density only in the fine refine below). PARALLEL across the persistent
+    //     pool (<=4 cores): the thousands of grid score() calls are independent. Each
+    //     row writes its OWN best candidate; the reduction below runs in row order with
+    //     the same strict-> tie-break as a serial scan, so the result is BIT-IDENTICAL
+    //     to serial -- a pure speedup. (A serial loop was kept previously because
+    //     cv::parallel_for_/ConcRT overhead dwarfed the then sub-ms work; at ~100 ms
+    //     this fork-join overhead is negligible.) ---
     const auto gstep = static_cast<double>(kCsym.coarseStep);
     const int nrows = static_cast<int>(std::lround(2.0 * static_cast<double>(sr) / gstep));
     const int sstep = kCsym.coarseSampleStep;
-    Cand c0;
-    for (int iy = 0; iy <= nrows; ++iy) {
+    std::vector<Cand> rowBest(static_cast<size_t>(nrows) + 1);
+    parallel_for(nrows + 1, [&](int iy) {
         const double y = cyRef - sr + static_cast<double>(iy) * gstep;
+        Cand best;
         for (int ix = 0; ix <= nrows; ++ix) {
             const double x = cxRef - sr + static_cast<double>(ix) * gstep;
             const double dx = x - cxRef;
@@ -121,12 +125,20 @@ MarkResult detect_one_field_csym(const cv::Mat& gFull, const CircularSymmetry& s
             }
             double e = 0.0;
             const double s = sym.score(g, x, y, e, sstep, median);
-            if (s > c0.s) {
-                c0.s = s;
-                c0.x = x;
-                c0.y = y;
-                c0.e = e;
+            if (s > best.s) {
+                best.s = s;
+                best.x = x;
+                best.y = y;
+                best.e = e;
             }
+        }
+        rowBest[static_cast<size_t>(iy)] = best;
+    });
+    Cand c0;
+    for (int iy = 0; iy <= nrows; ++iy) {
+        const Cand& b = rowBest[static_cast<size_t>(iy)];
+        if (b.s > c0.s) {  // strict > -> earliest row (then col) wins, exactly as serial
+            c0 = b;
         }
     }
 
@@ -235,20 +247,28 @@ double CircularSymmetry::score(const cv::Mat& g, double cx, double cy, double& e
         double s = 0.0;
         double s2 = 0.0;
         int cnt = 0;
+        // Skip the per-sample bounds test when the whole ring is inside the image
+        // (the common case -- the mark sits well inside the ROI): |ox_|,|oy_| <= rr.
+        const double rr = ringR_[static_cast<size_t>(ri)];
+        const bool ringInside =
+            cx - rr >= 1.0 && cx + rr < wlim && cy - rr >= 1.0 && cy + rr < hlim;
         for (int i = a; i < b; i += step) {
             const double x = cx + ox_[static_cast<size_t>(i)];
             const double y = cy + oy_[static_cast<size_t>(i)];
-            if (x < 1.0 || y < 1.0 || x >= wlim || y >= hlim) {
+            if (!ringInside && (x < 1.0 || y < 1.0 || x >= wlim || y >= hlim)) {
                 continue;
             }
             const double v = bilin(data, gstep, x, y);
             s += v;
             s2 += v * v;
             ++cnt;
-            sumAll += v;
-            sumAll2 += v * v;
-            ++nAll;
         }
+        // Overall stats are the sum of the per-ring stats -- accumulate once per ring
+        // (NOT per sample): same result, far fewer adds in the hot loop. Includes
+        // sparse (cnt<4) rings, exactly as before (they contributed per-sample then).
+        sumAll += s;
+        sumAll2 += s2;
+        nAll += cnt;
         if (cnt < 4) {
             continue;
         }

@@ -42,7 +42,7 @@ result $?
 gate "clang-tidy (portable, Windows-free TUs: src/detect_*.cpp + settings.cpp)"
 clang-tidy -p build-lint src/detect_common.cpp src/detect_circle.cpp \
     src/detect_contour.cpp src/detect_template.cpp src/detect_symmetry.cpp \
-    src/detect_component.cpp src/settings.cpp
+    src/detect_component.cpp src/settings.cpp src/thread_pool.cpp
 result $?
 
 # Local-only: the OpenCV-free Windows TUs (capture/controller/settings_ui) need
