@@ -46,8 +46,11 @@ preview, and forwards everything else to the original — which you rename to
   default**. A rectilinear-symmetry detector (center + size + angle) ships but stays
   inert: `CheckComp` is a pure passthrough unless the operator opts in via a sentinel
   file, and even then runs only in **shadow mode** — logging a pose alongside the
-  original without driving placement, pending on-hardware calibration. A
-  minimum-area-rectangle path is the fallback for asymmetric parts.
+  original without driving placement. A minimum-area-rectangle path is the fallback
+  for asymmetric parts. The pose-to-host transform is now **calibrated on hardware**
+  (against the original DLL over hundreds of real reads); the detector tracks centered
+  parts to sub-pixel and correctly ignores the off-nozzle distractors the stock vision
+  locks onto. A drive-mode validation pass is the remaining step before it's enabled.
 
 Contributions and test reports (especially on the 802A) are welcome.
 
