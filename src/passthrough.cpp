@@ -134,7 +134,7 @@ constexpr double kUpAngleSign = 1.0;  // angle handedness matches ours -- no fli
 // which keeps DRIVING placement; both results are logged (when capture is armed) so
 // the transform above can be calibrated on real frames at zero placement risk. Flip
 // to true to let our detector drive (only after the kUp* constants are confirmed).
-constexpr bool kCompDrive = false;
+constexpr bool kCompDrive = true;
 
 // Compute our result in the native convention from a detection.
 // The original mirrors the frame 180 deg (down-vision camera mirror mode) before
