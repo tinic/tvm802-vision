@@ -405,9 +405,20 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                           g_inst, nullptr);
 
             g_lblStatus = make_static(hwnd, " NO LOCK", 12, 394, 396, 42);
-            make_button(hwnd, ID_BTN_SAVE, "Save", 60, 446, 80, 26);
-            make_button(hwnd, ID_BTN_RESET, "Reset", 150, 446, 80, 26);
-            make_button(hwnd, ID_BTN_CLOSE, "Close", 240, 446, 80, 26);
+            // Center the bottom button row on the ACTUAL client width (computed, not
+            // hard-coded x positions) so it stays centered regardless of width / DPI.
+            constexpr int kBtnW = 80;
+            constexpr int kBtnH = 26;
+            constexpr int kBtnGap = 10;
+            constexpr int kBtnY = 446;
+            constexpr int kNBtn = 3;
+            RECT cr{};
+            GetClientRect(hwnd, &cr);
+            const int bx0 =
+                static_cast<int>((cr.right - (kNBtn * kBtnW + (kNBtn - 1) * kBtnGap)) / 2);
+            make_button(hwnd, ID_BTN_SAVE, "Save", bx0, kBtnY, kBtnW, kBtnH);
+            make_button(hwnd, ID_BTN_RESET, "Reset", bx0 + (kBtnW + kBtnGap), kBtnY, kBtnW, kBtnH);
+            make_button(hwnd, ID_BTN_CLOSE, "Close", bx0 + 2 * (kBtnW + kBtnGap), kBtnY, kBtnW, kBtnH);
 
             {  // open showing the currently-active mode's settings
                 const int m0 = get_status().mode;
