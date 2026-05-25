@@ -1,6 +1,8 @@
 #include "vision.h"
 
+#include "detect_common.h"
 #include "iplframe.h"
+#include "settings.h"
 
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
@@ -330,14 +332,18 @@ CompResult minarea_fallback(const cv::Mat& g, const cv::Rect& crop,
 // discrete part. Rejects the off-nozzle distractors and frame-filling blobs the stock
 // vision locks onto. Angle-agnostic, so it never interferes with the pick-angle /
 // rotation handling.
-bool plausible_part(double cx, double cy, double w, double h,
-                    double refXf, double refYf, int sr, const cv::Rect& crop) {
+bool plausible_part(double cx, double cy, double w, double h, double refXf, double refYf, int sr,
+                    const cv::Rect& crop, double maxSizePx) {
     const double dx = cx - refXf;
     const double dy = cy - refYf;
     if (dx * dx + dy * dy > static_cast<double>(sr) * static_cast<double>(sr)) {
         return false;  // off the nozzle -> not the picked part
     }
-    if (w > kComp.fillCap * crop.width || h > kComp.fillCap * crop.height) {
+    if (maxSizePx > 0.0) {
+        if (w > maxSizePx || h > maxSizePx) {
+            return false;  // exceeds the operator's configured max part size
+        }
+    } else if (w > kComp.fillCap * crop.width || h > kComp.fillCap * crop.height) {
         return false;  // box ~= ROI -> background/border latch, not a part
     }
     return true;
@@ -376,12 +382,28 @@ CompResult detect_component(const void* frame,
             gray = wrapped;
         }
 
+        // Live tuning from the settings UI ("Component" mode). Every field is a no-op
+        // at its neutral value, so an unconfigured machine runs exactly on the defaults.
+        const Settings cfg = get_settings(MODE_COMP);
+        const double minSym = (cfg.minSymmetry > 0.0) ? cfg.minSymmetry : kComp.minSymQuality;
+
         const double rxF = (refX >= 0.0) ? refX : gray.cols / 2.0;
         const double ryF = (refY >= 0.0) ? refY : gray.rows / 2.0;
-        const int sr = (searchRadiusPx > 0) ? searchRadiusPx : kComp.searchFallbackPx;
+        // Search radius (also the stray-guard center tolerance): UI override > host arg > default.
+        int sr = kComp.searchFallbackPx;
+        if (cfg.radiusMinPx > 0.0) {
+            sr = static_cast<int>(cfg.radiusMinPx);
+        } else if (searchRadiusPx > 0) {
+            sr = searchRadiusPx;
+        }
 
-        // ROI around the reference: search radius + half the expected body + pad.
-        const double halfBody = 0.5 * std::max({expectedWpx, expectedHpx, 0.0});
+        // ROI around the reference: center tolerance (sr) + half the part body + pad.
+        // The "Max part size" knob sizes the body so a large part (e.g. an LQFP MCU,
+        // hundreds of px) is fully contained; else the host's expected-size prior (usually
+        // absent). So sr stays a small center tolerance while big parts still fit the ROI.
+        const double halfBody = (cfg.radiusMaxPx > 0.0)
+                                    ? 0.5 * cfg.radiusMaxPx
+                                    : 0.5 * std::max({expectedWpx, expectedHpx, 0.0});
         const int rad = sr + static_cast<int>(std::ceil(halfBody)) + kComp.roiPad;
         const cv::Rect crop = cv::Rect(cvRound(rxF) - rad, cvRound(ryF) - rad, 2 * rad, 2 * rad) &
                               cv::Rect(0, 0, gray.cols, gray.rows);
@@ -389,14 +411,20 @@ CompResult detect_component(const void* frame,
             return r;
         }
 
-        const cv::Mat sub = gray(crop);
+        // OWN copy of the ROI: image adjustments modify in place, and `gray` may alias
+        // the live frame buffer (channels==1), which must stay untouched.
+        cv::Mat sub = gray(crop).clone();
+        const double meanLo = (cfg.meanLo > 0.0) ? cfg.meanLo : kComp.meanLo;
+        const double meanHi = (cfg.meanHi > 0.0) ? cfg.meanHi : kComp.meanHi;
         const double meanv = cv::mean(sub)[0];
-        if (meanv < kComp.meanLo || meanv > kComp.meanHi) {
+        if (meanv < meanLo || meanv > meanHi) {
             return r;  // dropped / blown
         }
+        apply_image_adjustments(sub, cfg);  // gamma/brightness/contrast/levels/sharpen
 
         cv::Mat g;
-        cv::GaussianBlur(sub, g, cv::Size(kComp.gaussKernel, kComp.gaussKernel), 1.0);
+        const int gk = (cfg.blur > 0.0) ? blur_kernel(cfg.blur, kComp.gaussKernel) : kComp.gaussKernel;
+        cv::GaussianBlur(sub, g, cv::Size(gk, gk), 1.0);
 
         // --- Primary: rectlinear symmetry ---
         const double aDeg = best_angle(g);
@@ -439,16 +467,16 @@ CompResult detect_component(const void* frame,
             r.quality = std::min(fx.sym, fy.sym);  // weakest axis governs confidence
             r.method = CompResult::Method::Symmetry;
             (void)expectedAngleDeg;  // reserved: narrow the angle search once data exists
-            if (!plausible_part(r.cx, r.cy, r.w, r.h, rxF, ryF, sr, crop)) {
-                r.found = false;  // stray (off-nozzle / fills the ROI) -> drop, try fallback
-            } else if (r.quality >= kComp.minSymQuality) {
+            if (!plausible_part(r.cx, r.cy, r.w, r.h, rxF, ryF, sr, crop, cfg.radiusMaxPx)) {
+                r.found = false;  // stray (off-nozzle / too big) -> drop, try fallback
+            } else if (r.quality >= minSym) {
                 return r;
             }
         }
 
         // --- Fallback: thresholded-silhouette minAreaRect ---
         const CompResult fb = minarea_fallback(g, crop, rxF - crop.x, ryF - crop.y, thr);
-        if (fb.found && plausible_part(fb.cx, fb.cy, fb.w, fb.h, rxF, ryF, sr, crop)) {
+        if (fb.found && plausible_part(fb.cx, fb.cy, fb.w, fb.h, rxF, ryF, sr, crop, cfg.radiusMaxPx)) {
             CompResult out = fb;
             out.imgW = r.imgW;
             out.imgH = r.imgH;

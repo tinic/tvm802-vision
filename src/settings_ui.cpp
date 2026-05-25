@@ -54,7 +54,8 @@ enum : int { ID_TIMER = 1,
              ID_CHK_ROUND = 1104,
              ID_CHK_CIRCULAR = 1105,
              ID_CHK_TEMPLATE = 1106,
-             ID_CHK_COMP = 1107 };
+             ID_CHK_COMP = 1107,
+             ID_CBO_MODE = 1108 };  // "Edit:" detector dropdown
 
 // One slider per tunable. `kind` drives both the value-label format and the
 // Settings <-> trackbar mapping.
@@ -115,7 +116,9 @@ HWND g_chkMedian = nullptr;
 std::array<HWND, METHOD_COUNT> g_chkMethod{};  // Detector on/off boxes, METHOD_* order
 HBRUSH g_brGreen = nullptr, g_brRed = nullptr;
 bool g_lastFound = false;
+HWND g_cboMode = nullptr;                // "Edit:" detector dropdown (Round/Circular/Template/Component)
 int g_curMode = MODE_ROUND;              // which mode's settings the sliders currently edit
+bool g_modeManual = false;               // operator picked a mode -> stop auto-following until reopen
 HFONT g_font = nullptr;                  // host-matching UI font (system dialog font)
 HANDLE g_actctx = INVALID_HANDLE_VALUE;  // comctl32 v6 activation context -> themed controls
 
@@ -252,8 +255,24 @@ int tb_pos(std::size_t i) {
 }
 
 void refresh_value_labels() {
+    const bool comp = (g_curMode == MODE_COMP);
     for (std::size_t i = 0; i < kDefs.size(); ++i) {
-        SetWindowTextA(g_lblVal[i], format_value(kDefs[i].kind, tb_pos(i)).c_str());
+        std::string v;
+        if (comp && (i == S_RMIN || i == S_RMAX)) {
+            // Component's repurposed guard sliders read as DIRECT px (not the fiducial
+            // 2x diameter) with the UP-camera mm scale.
+            const int pos = tb_pos(i);
+            if (pos <= 0) {
+                v = "Auto";
+            } else if (const CamScale sc = up_cam_scale(); sc.valid && sc.xMmPerPx > 0.0) {
+                v = std::format("{} px ({:.1f} mm)", pos, pos * (sc.xMmPerPx + sc.yMmPerPx) * 0.5);
+            } else {
+                v = std::format("{} px", pos);
+            }
+        } else {
+            v = format_value(kDefs[i].kind, tb_pos(i));
+        }
+        SetWindowTextA(g_lblVal[i], v.c_str());
     }
 }
 
@@ -298,10 +317,15 @@ void apply_from_controls() {
 // Which controls actually affect a given mode (the rest are greyed out).
 bool slider_applies(int mode, std::size_t idx) {
     switch (idx) {
-        case S_SYM: return mode == MODE_ROUND;  // symmetry accept threshold: Round only
+        case S_SYM:
+            return mode == MODE_ROUND || mode == MODE_COMP;  // symmetry accept: Round + Component
         case S_RMIN:
-        case S_RMAX: return mode == MODE_ROUND || mode == MODE_CIRCULAR;  // diameter bracket
-        default: return true;                                             // exposure gate + all image adjustments: every mode
+        case S_RMAX:
+            // Fiducial diameter bracket (Round/Circular); repurposed as the stray-guard
+            // search radius / max part size for Component.
+            return mode == MODE_ROUND || mode == MODE_CIRCULAR || mode == MODE_COMP;
+        default:
+            return true;  // exposure gate + all image adjustments: every mode
     }
 }
 
@@ -319,6 +343,13 @@ void update_enabled(int mode) {
 
 void controls_from_settings() {
     const Settings s = get_settings(g_curMode);
+    const bool comp = (g_curMode == MODE_COMP);
+    // Component repurposes the two diameter sliders as stray-guard knobs in DIRECT
+    // pixels that span the up-camera frame -- a large LQFP with pins is hundreds of px
+    // (e.g. LQFP-176 ~26mm ~585px at ~22.5 px/mm), far past the fiducial 0-120 radius.
+    // Set the range BEFORE TBM_SETPOS so the loaded value isn't clamped to the old max.
+    SendMessageA(g_tb[S_RMIN], TBM_SETRANGEMAX, TRUE, comp ? 320 : kDefs[S_RMIN].hi);  // search radius px
+    SendMessageA(g_tb[S_RMAX], TBM_SETRANGEMAX, TRUE, comp ? 640 : kDefs[S_RMAX].hi);  // max part size px
     std::array<int, S_COUNT> pos{};
     pos[S_RMIN] = static_cast<int>(s.radiusMinPx);
     pos[S_RMAX] = static_cast<int>(s.radiusMaxPx);
@@ -336,15 +367,24 @@ void controls_from_settings() {
         SendMessageA(g_tb[i], TBM_SETPOS, TRUE, static_cast<LPARAM>(pos[i]));
     }
     SendMessageA(g_chkMedian, BM_SETCHECK, s.medianRings > 0.5 ? BST_CHECKED : BST_UNCHECKED, 0);
+    // Component has no fiducial ring: relabel the two repurposed sliders to the
+    // stray-guard knobs. Down modes keep the diameter-bracket labels.
+    SetWindowTextA(g_lblName[S_RMIN], comp ? "Search radius" : "Diameter min");
+    SetWindowTextA(g_lblName[S_RMAX], comp ? "Max part size" : "Diameter max");
+    if (g_cboMode != nullptr) {
+        SendMessageA(g_cboMode, CB_SETCURSEL, static_cast<WPARAM>(g_curMode - 1), 0);  // sync dropdown
+    }
     update_enabled(g_curMode);
     refresh_value_labels();
 }
 
 void refresh_status() {
     const LiveStatus st = get_status();
-    // Follow the active mark mode: when it changes, load THAT mode's settings into
-    // the sliders (each mode has its own tuning).
-    if (st.mode >= MODE_ROUND && st.mode <= MODE_TEMPLATE && st.mode != g_curMode) {
+    // Follow the active mark mode: when it changes, load THAT mode's settings into the
+    // sliders (each mode has its own tuning). Suspended once the operator picks a mode
+    // from the dropdown (e.g. Component, which never auto-activates) until the dialog
+    // is reopened.
+    if (!g_modeManual && st.mode >= MODE_ROUND && st.mode <= MODE_TEMPLATE && st.mode != g_curMode) {
         g_curMode = st.mode;
         controls_from_settings();
     }
@@ -395,7 +435,16 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 icc.dwICC = ICC_BAR_CLASSES;
                 InitCommonControlsEx(&icc);
 
-                g_lblMode = make_static(hwnd, "Active mode:  (none yet)", 12, 8, 396, 18);
+                g_lblMode = make_static(hwnd, "Active mode:  (none yet)", 12, 8, 206, 18);
+                make_static(hwnd, "Edit:", 224, 9, 30, 16);
+                g_cboMode = CreateWindowExA(0, "COMBOBOX", "",
+                                            WS_CHILD | WS_VISIBLE | WS_VSCROLL | CBS_DROPDOWNLIST,
+                                            256, 6, 152, 220, hwnd,
+                                            reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_CBO_MODE)),
+                                            g_inst, nullptr);
+                for (const char* name : {"Round", "Circular", "ImageTemplate", "Component"}) {
+                    SendMessageA(g_cboMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(name));
+                }
                 make_static(hwnd, "- Detection -", 12, 28, 200, 16);
                 make_static(hwnd, "- Image adjustments -", 12, 196, 240, 16);
 
@@ -503,6 +552,13 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     const bool on = SendMessageA(g_chkMethod[static_cast<std::size_t>(method)],
                                                  BM_GETCHECK, 0, 0) == BST_CHECKED;
                     set_method_enabled(method, on);  // live; persists in the INI on Save
+                } else if (id == ID_CBO_MODE && HIWORD(wParam) == CBN_SELCHANGE) {
+                    const auto sel = static_cast<int>(SendMessageA(g_cboMode, CB_GETCURSEL, 0, 0));
+                    if (sel >= 0) {
+                        g_curMode = sel + 1;  // dropdown index 0..3 -> MODE_ROUND..MODE_COMP
+                        g_modeManual = true;  // operator chose a mode -> stop auto-following
+                        controls_from_settings();
+                    }
                 }
                 return 0;
             }
@@ -549,6 +605,7 @@ void toggle_window() {
     if (IsWindowVisible(g_win) != 0) {
         ShowWindow(g_win, SW_HIDE);
     } else {
+        g_modeManual = false;  // each open resumes auto-following the active mode
         ShowWindow(g_win, SW_SHOW);
         SetForegroundWindow(g_win);
     }

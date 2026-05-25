@@ -33,13 +33,19 @@ struct Settings {
     double medianRings = 0.0;  // Round: combine rings by MEDIAN (robust to glare) instead of mean; 0 = off, 1 = on
 };
 
-// Mark modes (match LiveStatus.mode). Settings are kept PER MODE, so Round /
-// Circular / ImageTemplate each have an independent tuning.
+// Detector modes. Settings are kept PER MODE, so each has an independent tuning.
+// Round / Circular / ImageTemplate are the down-vision marks (match LiveStatus.mode);
+// Component is up-vision (CheckComp). The UI's mode dropdown selects which one to edit.
+// For MODE_COMP a few Settings fields are reinterpreted (the part has no fiducial
+// ring): radiusMinPx = stray-guard search radius px, radiusMaxPx = stray-guard max
+// part size px (0 = the detector's defaults). minSymmetry / meanLo / meanHi / blur /
+// image adjustments mean the same as elsewhere.
 enum { MODE_NONE = 0,
        MODE_ROUND = 1,
        MODE_CIRCULAR = 2,
        MODE_TEMPLATE = 3,
-       MODE_COUNT = 4 };
+       MODE_COMP = 4,
+       MODE_COUNT = 5 };
 
 // Thread-safe per-mode snapshot / update (the UI thread writes; detector threads
 // read). A mode outside [1,3] is clamped to MODE_ROUND.

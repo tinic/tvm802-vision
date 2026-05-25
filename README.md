@@ -42,15 +42,19 @@ preview, and forwards everything else to the original — which you rename to
 
 - [x] **Down-vision complete** — all three mark modes implemented, field-aware,
   and hardware-validated.
-- [~] **Up-vision component detection** (`CheckComp`) — prototype, **disabled by
-  default**. A rectilinear-symmetry detector (center + size + angle) ships but stays
-  inert: `CheckComp` is a pure passthrough unless the operator opts in via a sentinel
-  file, and even then runs only in **shadow mode** — logging a pose alongside the
-  original without driving placement. A minimum-area-rectangle path is the fallback
-  for asymmetric parts. The pose-to-host transform is now **calibrated on hardware**
-  (against the original DLL over hundreds of real reads); the detector tracks centered
-  parts to sub-pixel and correctly ignores the off-nozzle distractors the stock vision
-  locks onto. A drive-mode validation pass is the remaining step before it's enabled.
+- [x] **Up-vision component detection** (`CheckComp`) — **drives placement, validated
+  on hardware** (still opt-in via a sentinel file, so a shipped DLL is inert until an
+  operator enables it). A rectilinear-symmetry detector (center + size + angle) with a
+  minimum-area-rectangle fallback for asymmetric parts; the pose-to-host transform is
+  calibrated against the original DLL over hundreds of real reads. It tracks parts to
+  sub-pixel, ignores the off-nozzle distractors the stock vision locks onto, and renders
+  its own oriented overlay (green body box + direction arrow). Live tuning shares the
+  `Ctrl+Alt+M` dialog (pick **Component** from the mode dropdown). Per-detector on/off
+  checkboxes let an operator fall any method back to the stock vision.
+  - [ ] **Known gap:** when no part is on the nozzle (e.g. dropped in flight), it does
+    not yet *reject* the placement — it falls back to the stock detector. A clean reject
+    needs the host's internal nozzle-calibration, which isn't exposed; tracked for future
+    work.
 
 Contributions and test reports (especially on the 802A) are welcome.
 
@@ -114,14 +118,19 @@ detection **on the machine, with no recompile and no file editing**, watching a
 offset) update as you drag — so you adjust until the marker turns green. The
 preview also shows the image adjustments live.
 
-- **Per mode.** Round, Circular, and ImageTemplate each have independent settings;
-  the panel automatically follows whichever mode is running, and controls that don't
-  affect that mode are greyed out. **Save** writes `MVision.ini` in the app's working
-  directory (reloaded on next launch); **Reset** reverts the current mode. Everything
-  starts at **Auto / neutral**, so nothing changes until you move a control.
+- **Per mode.** Round, Circular, ImageTemplate, and **Component** (up-vision) each
+  have independent settings. The panel follows whichever down mode is running; use the
+  **Edit:** dropdown to pick a mode manually (the only way to reach Component, since
+  up-vision publishes no mode). Controls that don't affect the selected mode are greyed
+  out. **Save** writes `MVision.ini` (reloaded on next launch); **Reset** reverts the
+  current mode. Everything starts at **Auto / neutral**.
+- **Detectors on/off.** Four checkboxes (Round / Circular / ImageTemplate / Component)
+  fall any one method back to the **stock** vision without reinstalling; default on.
 - **Detection:** fiducial **radius** bracket (min/max px), accept **sensitivity**
   (lower = more lenient), **exposure** gate (min/max frame brightness), and — for
-  Round — **median ring scoring** (more robust to glare).
+  Round — **median ring scoring** (more robust to glare). In **Component** mode the two
+  radius sliders become the stray-guard **search radius** and **max part size** (in px,
+  spanning the up-camera frame — large LQFP MCUs are hundreds of px).
 - **Image adjustments** (applied before detection): **gamma, brightness, contrast,
   black/white levels, sharpen,** and a Gaussian **blur** (smooths a speckled or
   specular pad so it reads cleanly).

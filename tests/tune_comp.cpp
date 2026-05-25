@@ -3,9 +3,10 @@
 // compare.log when capture is armed) and prints per-frame pose + a method tally, so
 // the detector can be tuned against the original's logged baseline before going
 // live. Optional priors via flags. Build standalone:
-//   g++ -std=c++20 -O2 -I src tests/tune_comp.cpp \
+//   g++ -std=c++20 -O2 -pthread -I src tests/tune_comp.cpp \
 //       src/detect_common.cpp src/detect_circle.cpp src/detect_contour.cpp \
 //       src/detect_template.cpp src/detect_symmetry.cpp src/detect_component.cpp \
+//       src/settings.cpp src/thread_pool.cpp \
 //       $(pkg-config --cflags --libs opencv4) -o /tmp/tune_comp
 // Usage: /tmp/tune_comp [--w EXPW_PX --h EXPH_PX --a EXPA_DEG] frame*.png
 #include "vision.h"

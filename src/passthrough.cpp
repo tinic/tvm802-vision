@@ -507,7 +507,12 @@ int __stdcall CheckComp(void* f, int hwnd, int w, int h) {
             mv::orig::CheckComp(f, hwnd, w, h);  // original: result for the log + render fallback
             rc = 0;
         } else {
-            g_resultSrc = ResultSrc::Original;  // our miss -> original drives
+            // No part near the nozzle. A synthetic zero/reference offset WANDERS: the host
+            // subtracts an internal nozzle calibration (not the up-vision offset, which is
+            // 0 here) and keeps applying a correction until timeout, then places randomly.
+            // So fall back to the original (stable -- it converges on its own blob and
+            // places where the part was) until a wander-free reject is worked out.
+            g_resultSrc = ResultSrc::Original;
             rc = mv::orig::CheckComp(f, hwnd, w, h);
         }
     } else {

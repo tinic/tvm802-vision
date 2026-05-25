@@ -262,10 +262,11 @@ bool render_comp_preview(const void* frame, void* hwndV, const CompResult& cr) {
         if (wrapped.empty()) {
             return false;
         }
-        // Up camera: detection/offset use the UNflipped buffer (calibrated -- our center
-        // matches the original's reported offset, no mirror). But the host DISPLAYS the
-        // up view horizontally mirrored, so mirror the PREVIEW to match it, and map the
-        // overlay through the same flip below so the box still lands on the part.
+        // Show the frame exactly as the detector sees it (NO flip), so the overlay box at
+        // the detected (cx,cy)/angle lands precisely on the part -- this is the only
+        // orientation confirmed correct for the box. The display-orientation fix (if the
+        // operator wants the image un-mirrored) is applied separately once verified from
+        // the debug capture below; it must not move the box off the part.
         (void)origin;
         cv::Mat gray;
         if (wrapped.channels() == 1) {
@@ -277,7 +278,6 @@ bool render_comp_preview(const void* frame, void* hwndV, const CompResult& cr) {
         }
         cv::Mat bgr;
         cv::cvtColor(gray, bgr, cv::COLOR_GRAY2BGR);
-        cv::flip(bgr, bgr, 1);  // 1 = horizontal mirror, to match the host's up display
 
         const int W = bgr.cols;
         const int H = bgr.rows;
@@ -318,13 +318,15 @@ bool render_comp_preview(const void* frame, void* hwndV, const CompResult& cr) {
 
         // Detected part (green = locked): oriented body box + center cross + a direction
         // arrow poking past one edge so the rotation reads at a glance (OpenPnP's
-        // DrawRotatedRects style). The preview is horizontally mirrored above, so map the
-        // detection through the same flip: x -> W - cx, and a horizontal mirror negates
-        // the angle (the detector reports it in OpenCV's RotatedRect convention on the
-        // unflipped buffer; validated against captured frames + detection).
+        // DrawRotatedRects style). Center maps straight in (no flip). The box angle is
+        // NEGATED: cv::RotatedRect's angle convention is the opposite sign of the
+        // detector's (and the host's, which places correctly with cr.angle as-is) -- a
+        // sign error is invisible at 0/45 deg (a near-square draws the same box either
+        // way) but tilts the box the wrong way at intermediate angles. We negate only the
+        // OVERLAY; cr.angle that drives placement is untouched.
         if (cr.found) {
             const cv::Scalar green(0, 255, 0);
-            const auto u = static_cast<float>((static_cast<double>(W) - cr.cx) - cropLeft);
+            const auto u = static_cast<float>(cr.cx - cropLeft);
             const auto v = static_cast<float>(cr.cy - cropTop);
             const cv::RotatedRect rr(cv::Point2f(u, v),
                                      cv::Size2f(static_cast<float>(cr.w), static_cast<float>(cr.h)),
@@ -334,7 +336,7 @@ bool render_comp_preview(const void* frame, void* hwndV, const CompResult& cr) {
             for (int i = 0; i < 4; ++i) {
                 cv::line(work, p[i], p[(i + 1) % 4], green, RT, cv::LINE_AA);
             }
-            // Arrow along the height axis (angle - 90 deg), 1.3x half-height out.
+            // Arrow along the height axis (box angle - 90 deg), 1.3x half-height out.
             const double ma = (-cr.angle - 90.0) * CV_PI / 180.0;
             const cv::Point center(cvRound(u), cvRound(v));
             const cv::Point tip(cvRound(u + 1.3 * cr.h / 2.0 * std::cos(ma)),

@@ -46,7 +46,7 @@ int method_from_key(const std::string& s) {
 }
 
 std::size_t clamp_mode(int m) {
-    return static_cast<std::size_t>((m >= MODE_ROUND && m <= MODE_TEMPLATE) ? m : MODE_ROUND);
+    return static_cast<std::size_t>((m >= MODE_ROUND && m <= MODE_COMP) ? m : MODE_ROUND);
 }
 
 const char* mode_name(int m) {
@@ -56,7 +56,10 @@ const char* mode_name(int m) {
     if (m == MODE_CIRCULAR) {
         return "circular";
     }
-    return "template";
+    if (m == MODE_TEMPLATE) {
+        return "template";
+    }
+    return "component";
 }
 
 int mode_from_name(const std::string& s) {
@@ -68,6 +71,9 @@ int mode_from_name(const std::string& s) {
     }
     if (s == "template") {
         return MODE_TEMPLATE;
+    }
+    if (s == "component") {
+        return MODE_COMP;
     }
     return MODE_NONE;
 }
@@ -198,7 +204,7 @@ void load_settings(const char* path) {
                   std::strtod(line.c_str() + eq + 1, nullptr));
     }
     std::lock_guard<std::mutex> const lk(g_mu);
-    for (int m = MODE_ROUND; m <= MODE_TEMPLATE; ++m) {
+    for (int m = MODE_ROUND; m <= MODE_COMP; ++m) {
         g_settings[static_cast<std::size_t>(m)] = parsed[static_cast<std::size_t>(m)];
     }
     g_enabled = parsedEn;
@@ -212,7 +218,7 @@ void save_settings(const char* path) {
     std::array<bool, METHOD_COUNT> snapEn{};
     {
         std::lock_guard<std::mutex> const lk(g_mu);
-        for (int m = MODE_ROUND; m <= MODE_TEMPLATE; ++m) {
+        for (int m = MODE_ROUND; m <= MODE_COMP; ++m) {
             snap[static_cast<std::size_t>(m)] = g_settings[static_cast<std::size_t>(m)];
         }
         snapEn = g_enabled;
@@ -226,7 +232,7 @@ void save_settings(const char* path) {
         f << method_key(m) << "=" << (snapEn[static_cast<std::size_t>(m)] ? 1 : 0) << "\n";
     }
     f << "\n";
-    for (int m = MODE_ROUND; m <= MODE_TEMPLATE; ++m) {
+    for (int m = MODE_ROUND; m <= MODE_COMP; ++m) {
         write_section(f, m, snap[static_cast<std::size_t>(m)]);
     }
 }
