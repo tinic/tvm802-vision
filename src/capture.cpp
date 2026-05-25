@@ -16,8 +16,8 @@ constexpr const char* kCompTrigger = "C:\\mvision_capture\\comp";
 std::atomic<int> g_counter{0};
 
 bool file_exists(const char* path) {
-    DWORD a = GetFileAttributesA(path);
-    return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+    const DWORD a = GetFileAttributesA(path);
+    return a != INVALID_FILE_ATTRIBUTES && ((a & FILE_ATTRIBUTE_DIRECTORY) == 0u);
 }
 }  // namespace
 
@@ -39,7 +39,7 @@ bool comp_enabled() {
 }
 
 int next_index() {
-    int idx = g_counter.fetch_add(1, std::memory_order_relaxed);
+    const int idx = g_counter.fetch_add(1, std::memory_order_relaxed);
     CreateDirectoryA(kDir, nullptr);  // no-op if present
     return idx;
 }
@@ -52,8 +52,9 @@ void log_line(std::string_view line) {
     CreateDirectoryA(kDir, nullptr);
     // Binary append so the line ending stays LF-only (matches the original
     // fopen("ab") writer; text mode would translate '\n' -> "\r\n" on Windows).
-    if (std::ofstream f{std::format("{}\\compare.log", kDir), std::ios::app | std::ios::binary})
+    if (std::ofstream f{std::format("{}\\compare.log", kDir), std::ios::app | std::ios::binary}) {
         f << line << '\n';
+    }
 }
 
 }  // namespace cap

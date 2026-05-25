@@ -16,14 +16,28 @@ namespace vis::detail {
 // pointer, or nullptr if the header is missing/unsupported. Reads the header
 // only; never dereferences the pixel buffer.
 inline const IplImage* as_valid_ipl(const void* frame) {
-    if (!frame) return nullptr;
-    const IplImage* ipl = reinterpret_cast<const IplImage*>(frame);
-    if (ipl->nSize != sizeof(IplImage)) return nullptr;
-    if (ipl->width <= 0 || ipl->height <= 0) return nullptr;
-    if (ipl->width > 8192 || ipl->height > 8192) return nullptr;
-    if (ipl->nChannels != 1 && ipl->nChannels != 3) return nullptr;
-    if (ipl->depth != IPL_DEPTH_8U) return nullptr;
-    if (!ipl->imageData) return nullptr;
+    if (frame == nullptr) {
+        return nullptr;
+    }
+    const auto* ipl = reinterpret_cast<const IplImage*>(frame);
+    if (ipl->nSize != sizeof(IplImage)) {
+        return nullptr;
+    }
+    if (ipl->width <= 0 || ipl->height <= 0) {
+        return nullptr;
+    }
+    if (ipl->width > 8192 || ipl->height > 8192) {
+        return nullptr;
+    }
+    if (ipl->nChannels != 1 && ipl->nChannels != 3) {
+        return nullptr;
+    }
+    if (ipl->depth != IPL_DEPTH_8U) {
+        return nullptr;
+    }
+    if (ipl->imageData == nullptr) {
+        return nullptr;
+    }
     return ipl;
 }
 
@@ -34,10 +48,12 @@ inline const IplImage* as_valid_ipl(const void* frame) {
 inline cv::Mat wrap_ipl(const void* frame, int& origin) {
     origin = -1;
     const IplImage* ipl = as_valid_ipl(frame);
-    if (!ipl) return {};
+    if (ipl == nullptr) {
+        return {};
+    }
     origin = ipl->origin;
-    return cv::Mat(ipl->height, ipl->width, CV_MAKETYPE(CV_8U, ipl->nChannels),
-                   ipl->imageData, static_cast<size_t>(ipl->widthStep));
+    return {ipl->height, ipl->width, CV_MAKETYPE(CV_8U, ipl->nChannels),
+            ipl->imageData, static_cast<size_t>(ipl->widthStep)};
 }
 
 }  // namespace vis::detail

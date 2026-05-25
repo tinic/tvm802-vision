@@ -48,7 +48,8 @@ constexpr CsymParams kCsym;
 inline double bilin(const uchar* data, ptrdiff_t step, double x, double y) {
     const int x0 = static_cast<int>(x);
     const int y0 = static_cast<int>(y);
-    const double fx = x - x0, fy = y - y0;
+    const double fx = x - x0;
+    const double fy = y - y0;
     const uchar* row0 = data + static_cast<ptrdiff_t>(y0) * step;
     const uchar* row1 = row0 + step;
     const double a = row0[x0] * (1.0 - fx) + row0[x0 + 1] * fx;
@@ -74,20 +75,25 @@ MarkResult detect_one_field_csym(const cv::Mat& gFull, const CircularSymmetry& s
         const cv::Rect c = cv::Rect(cvRound(rxF) - rad, cvRound(ryF) - rad, 2 * rad, 2 * rad) &
                            cv::Rect(0, 0, gFull.cols, gFull.rows);
         const int need = 2 * static_cast<int>(maxR) + 4;
-        if (c.width > need && c.height > need) crop = c;
+        if (c.width > need && c.height > need) {
+            crop = c;
+        }
     }
     const cv::Mat sub = gFull(crop);
     const double meanv = cv::mean(sub)[0];
     const double meanLo = adj.meanLo > 0.0 ? adj.meanLo : kCsym.meanLo;
     const double meanHi = adj.meanHi > 0.0 ? adj.meanHi : kCsym.meanHi;
-    if (meanv < meanLo || meanv > meanHi) return r;  // dropped / blown
+    if (meanv < meanLo || meanv > meanHi) {
+        return r;  // dropped / blown
+    }
 
     const bool median = adj.medianRings > 0.5;
     const int gk = blur_kernel(adj.blur, kCsym.gaussKernel);
     cv::Mat g;
     cv::GaussianBlur(sub, g, cv::Size(gk, gk), 1.0);
     apply_image_adjustments(g, adj);  // optional UI image adjustments (no-op when neutral)
-    const double cxRef = rxF - crop.x, cyRef = ryF - crop.y;
+    const double cxRef = rxF - crop.x;
+    const double cyRef = ryF - crop.y;
     const double sr2 = static_cast<double>(sr) * sr;
 
     struct Cand {
@@ -100,7 +106,7 @@ MarkResult detect_one_field_csym(const cv::Mat& gFull, const CircularSymmetry& s
     //     search across the MSVC OpenCV ConcRT pool cost far more in scheduler
     //     overhead (VirtualProcessor / SchedulingNode / KiSwapThread /
     //     KeYieldExecution) than the work itself -- net-negative here. ---
-    const double gstep = static_cast<double>(kCsym.coarseStep);
+    const auto gstep = static_cast<double>(kCsym.coarseStep);
     const int nrows = static_cast<int>(std::lround(2.0 * static_cast<double>(sr) / gstep));
     const int sstep = kCsym.coarseSampleStep;
     Cand c0;
@@ -108,8 +114,11 @@ MarkResult detect_one_field_csym(const cv::Mat& gFull, const CircularSymmetry& s
         const double y = cyRef - sr + static_cast<double>(iy) * gstep;
         for (int ix = 0; ix <= nrows; ++ix) {
             const double x = cxRef - sr + static_cast<double>(ix) * gstep;
-            const double dx = x - cxRef, dy = y - cyRef;
-            if (dx * dx + dy * dy > sr2) continue;
+            const double dx = x - cxRef;
+            const double dy = y - cyRef;
+            if (dx * dx + dy * dy > sr2) {
+                continue;
+            }
             double e = 0.0;
             const double s = sym.score(g, x, y, e, sstep, median);
             if (s > c0.s) {
@@ -129,8 +138,11 @@ MarkResult detect_one_field_csym(const cv::Mat& gFull, const CircularSymmetry& s
         const double y = c0.y + iy;
         for (int ix = -span; ix <= span; ++ix) {
             const double x = c0.x + ix;
-            const double dx = x - cxRef, dy = y - cyRef;
-            if (dx * dx + dy * dy > sr2) continue;
+            const double dx = x - cxRef;
+            const double dy = y - cyRef;
+            if (dx * dx + dy * dy > sr2) {
+                continue;
+            }
             double e = 0.0;
             const double s = sym.score(g, x, y, e, 1, median);
             if (s > c1.s) {
@@ -141,7 +153,9 @@ MarkResult detect_one_field_csym(const cv::Mat& gFull, const CircularSymmetry& s
             }
         }
     }
-    if (c1.s < minSym) return r;
+    if (c1.s < minSym) {
+        return r;
+    }
 
     // Sub-pixel: parabolic fit on the score surface around the 1px winner (4 extra
     // full-density evals, not an N x N sub-grid scan).
@@ -150,13 +164,22 @@ MarkResult detect_one_field_csym(const cv::Mat& gFull, const CircularSymmetry& s
     const double sR = sym.score(g, c1.x + 1.0, c1.y, et, 1, median);
     const double sU = sym.score(g, c1.x, c1.y - 1.0, et, 1, median);
     const double sD = sym.score(g, c1.x, c1.y + 1.0, et, 1, median);
-    double dx = 0.0, dy = 0.0;
+    double dx = 0.0;
+    double dy = 0.0;
     const double denx = sL - 2.0 * c1.s + sR;
     const double deny = sU - 2.0 * c1.s + sD;
-    if (denx < 0.0) dx = 0.5 * (sL - sR) / denx;
-    if (deny < 0.0) dy = 0.5 * (sU - sD) / deny;
-    if (std::abs(dx) > 1.0) dx = 0.0;
-    if (std::abs(dy) > 1.0) dy = 0.0;
+    if (denx < 0.0) {
+        dx = 0.5 * (sL - sR) / denx;
+    }
+    if (deny < 0.0) {
+        dy = 0.5 * (sU - sD) / deny;
+    }
+    if (std::abs(dx) > 1.0) {
+        dx = 0.0;
+    }
+    if (std::abs(dy) > 1.0) {
+        dy = 0.0;
+    }
 
     r.found = true;
     r.cx = c1.x + dx + crop.x;
@@ -169,9 +192,9 @@ MarkResult detect_one_field_csym(const cv::Mat& gFull, const CircularSymmetry& s
 }  // namespace
 
 CircularSymmetry::CircularSymmetry(double minRadiusPx, double maxRadiusPx, int ringStep) {
-    if (ringStep < 1) ringStep = 1;
+    ringStep = std::max(ringStep, 1);
     int nRings = static_cast<int>((maxRadiusPx - minRadiusPx) / ringStep) + 1;
-    if (nRings < 1) nRings = 1;  // guard: an inverted bracket must NOT reserve(negative -> huge)
+    nRings = std::max(nRings, 1);  // guard: an inverted bracket must NOT reserve(negative -> huge)
     ringStart_.reserve(static_cast<size_t>(nRings) + 1);
     ringR_.reserve(static_cast<size_t>(nRings));
     for (int ri = 0; ri < nRings; ++ri) {
@@ -192,24 +215,32 @@ CircularSymmetry::CircularSymmetry(double minRadiusPx, double maxRadiusPx, int r
 // step>1 subsamples rings and points (coarse pass); step=1 is full (fine pass).
 double CircularSymmetry::score(const cv::Mat& g, double cx, double cy, double& edgeR, int step,
                                bool median) const {
-    double sumAll = 0.0, sumAll2 = 0.0;
+    double sumAll = 0.0;
+    double sumAll2 = 0.0;
     int nAll = 0;
-    double wRingVar = 0.0, wSum = 0.0, maxRingVar = -1.0;
+    double wRingVar = 0.0;
+    double wSum = 0.0;
+    double maxRingVar = -1.0;
     edgeR = 0.0;
-    std::array<float, 256> ringVars;  // per-ring variances, for the median combine
+    std::array<float, 256> ringVars{};  // per-ring variances, for the median combine
     int nRingVar = 0;
-    const double wlim = g.cols - 1.0, hlim = g.rows - 1.0;
-    const uchar* data = g.ptr<uchar>(0);                        // row pointer/stride computed ONCE here,
-    const ptrdiff_t gstep = static_cast<ptrdiff_t>(g.step[0]);  // not cv::Mat::ptr() per sample
+    const double wlim = g.cols - 1.0;
+    const double hlim = g.rows - 1.0;
+    const auto* data = g.ptr<uchar>(0);                    // row pointer/stride computed ONCE here,
+    const auto gstep = static_cast<ptrdiff_t>(g.step[0]);  // not cv::Mat::ptr() per sample
     const int nRings = static_cast<int>(ringR_.size());
     for (int ri = 0; ri < nRings; ri += step) {
         const int a = ringStart_[static_cast<size_t>(ri)];
         const int b = ringStart_[static_cast<size_t>(ri) + 1];
-        double s = 0.0, s2 = 0.0;
+        double s = 0.0;
+        double s2 = 0.0;
         int cnt = 0;
         for (int i = a; i < b; i += step) {
-            const double x = cx + ox_[static_cast<size_t>(i)], y = cy + oy_[static_cast<size_t>(i)];
-            if (x < 1.0 || y < 1.0 || x >= wlim || y >= hlim) continue;
+            const double x = cx + ox_[static_cast<size_t>(i)];
+            const double y = cy + oy_[static_cast<size_t>(i)];
+            if (x < 1.0 || y < 1.0 || x >= wlim || y >= hlim) {
+                continue;
+            }
             const double v = bilin(data, gstep, x, y);
             s += v;
             s2 += v * v;
@@ -218,23 +249,28 @@ double CircularSymmetry::score(const cv::Mat& g, double cx, double cy, double& e
             sumAll2 += v * v;
             ++nAll;
         }
-        if (cnt < 4) continue;
+        if (cnt < 4) {
+            continue;
+        }
         const double mean = s / cnt;
         double var = s2 / cnt - mean * mean;
-        if (var < 0.0) var = 0.0;
+        var = std::max(var, 0.0);
         wRingVar += cnt * var;
         wSum += cnt;
-        if (median && nRingVar < static_cast<int>(ringVars.size()))
+        if (median && nRingVar < static_cast<int>(ringVars.size())) {
             ringVars[static_cast<size_t>(nRingVar++)] = static_cast<float>(var);
+        }
         if (var > maxRingVar) {
             maxRingVar = var;
             edgeR = ringR_[static_cast<size_t>(ri)];
         }
     }
-    if (nAll < 16 || wSum < 1.0) return 0.0;
+    if (nAll < 16 || wSum < 1.0) {
+        return 0.0;
+    }
     const double meanAll = sumAll / static_cast<double>(nAll);
     double overallVar = sumAll2 / static_cast<double>(nAll) - meanAll * meanAll;
-    if (overallVar < 0.0) overallVar = 0.0;
+    overallVar = std::max(overallVar, 0.0);
     // Combine the per-ring variances. MEDIAN ignores a few glare-corrupted rings
     // (their high variance) that would otherwise inflate the mean and sink the
     // score; the default area-weighted mean is cheaper and slightly steadier.
@@ -243,7 +279,7 @@ double CircularSymmetry::score(const cv::Mat& g, double cx, double cy, double& e
     if (median && nRingVar > 0) {
         const int mid = nRingVar / 2;
         std::nth_element(ringVars.begin(), ringVars.begin() + mid, ringVars.begin() + nRingVar);
-        const double med = static_cast<double>(ringVars[static_cast<size_t>(mid)]);
+        const auto med = static_cast<double>(ringVars[static_cast<size_t>(mid)]);
         // The median rescues a genuine fiducial whose mean within-ring variance is
         // inflated by a few glare rings. But it must NOT collapse toward zero over a
         // flat black area that borders a bright edge: there most rings are flat (var
@@ -256,7 +292,7 @@ double CircularSymmetry::score(const cv::Mat& g, double cx, double cy, double& e
         const double lo = meanRingVar * kCsym.medianMeanFrac;
         avgRingVar = med > lo ? med : lo;
     }
-    if (avgRingVar < kCsym.minDenomVar) avgRingVar = kCsym.minDenomVar;  // noise floor, not 1e-6
+    avgRingVar = std::max(avgRingVar, kCsym.minDenomVar);  // noise floor, not 1e-6
     return overallVar / avgRingVar;
 }
 
@@ -272,17 +308,25 @@ MarkResult detect_circular_symmetry(const void* frame, double refX, double refY,
     try {
         // Precedence: UI/settings override > caller's diameter hint > built-in default.
         const Settings cfg = get_settings(MODE_ROUND);
-        double minR = cfg.radiusMinPx > 0.0 ? cfg.radiusMinPx
-                      : (minDiaPx > 0)      ? minDiaPx / 2.0
-                                            : static_cast<double>(kCsym.minRadiusPx);
-        double maxR = cfg.radiusMaxPx > 0.0 ? cfg.radiusMaxPx
-                      : (maxDiaPx > 0)      ? maxDiaPx / 2.0
-                                            : static_cast<double>(kCsym.maxRadiusPx);
+        auto minR = static_cast<double>(kCsym.minRadiusPx);
+        if (cfg.radiusMinPx > 0.0) {
+            minR = cfg.radiusMinPx;
+        } else if (minDiaPx > 0) {
+            minR = minDiaPx / 2.0;
+        }
+        auto maxR = static_cast<double>(kCsym.maxRadiusPx);
+        if (cfg.radiusMaxPx > 0.0) {
+            maxR = cfg.radiusMaxPx;
+        } else if (maxDiaPx > 0) {
+            maxR = maxDiaPx / 2.0;
+        }
         // Guard the bracket: an inverted/degenerate one (e.g. the user raised the min
         // slider above the still-Auto max) would otherwise make the ring builder
         // reserve a negative count -> throw. Widen to a sane bracket instead.
-        if (minR < 1.0) minR = 1.0;
-        if (maxR <= minR) maxR = minR + static_cast<double>(kCsym.maxRadiusPx - kCsym.minRadiusPx);
+        minR = std::max(minR, 1.0);
+        if (maxR <= minR) {
+            maxR = minR + static_cast<double>(kCsym.maxRadiusPx - kCsym.minRadiusPx);
+        }
         const double minSym = cfg.minSymmetry > 0.0 ? cfg.minSymmetry : kCsym.minSymmetry;
         const CircularSymmetry sym(minR, maxR, kCsym.ringStep);
         MarkResult r = detect_with_fields(frame, [&](const cv::Mat& g) {

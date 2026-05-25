@@ -4,12 +4,17 @@
 #   - 4-space indent (not Google's 2)
 #   - left-aligned pointers (const void* p)
 #   - namespace contents not indented
-#   - dense short ifs/loops/blocks kept on one line
+#   - control-flow bodies always braced as multi-line blocks (see below)
 #
 # ColumnLimit is 0 on purpose: the detector code uses intentionally wide, dense
 # lines and hand-aligned trailing comments. Disabling column-based reflow keeps
 # that layout intact while still enforcing indent/brace/spacing/pointer rules.
 # Set ColumnLimit to e.g. 100 if you'd rather have wrapping enforced.
+#
+# Short if/loop/block bodies are NOT kept on one line: clang-tidy
+# (readability-braces-around-statements) requires braces on every body -- brace-
+# less one-liners are merge-error-prone -- so AllowShort*OnASingleLine are off and
+# clang-format expands each body into a uniform `if (c) { ... }` block.
 ---
 Language:        Cpp
 Standard:        c++20
@@ -27,9 +32,9 @@ SortIncludes:    false
 SpacesBeforeTrailingComments: 2
 AlignTrailingComments: true
 AllowShortFunctionsOnASingleLine: Inline
-AllowShortIfStatementsOnASingleLine: WithoutElse
-AllowShortLoopsOnASingleLine: true
-AllowShortBlocksOnASingleLine: Always
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Never
 AllowShortCaseLabelsOnASingleLine: true
 KeepEmptyLinesAtTheStartOfBlocks: false
 ...

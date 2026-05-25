@@ -45,15 +45,14 @@ clang-tidy -p build-lint src/detect_common.cpp src/detect_circle.cpp \
     src/detect_component.cpp src/settings.cpp
 result $?
 
-# Local-only: the OpenCV-free Windows TUs (capture/controller/settings_ui) hold
-# the bulk of the std::format / std::array work but need <windows.h>, so the
-# stock Linux clang-tidy can't see them. If an i686 mingw toolchain is present,
-# tidy just the modernization gate against the mingw target (no compile DB / no
-# OpenCV needed). Skipped (not failed) when the toolchain is absent.
-gate "clang-tidy modernization (Windows TUs via mingw)"
+# Local-only: the OpenCV-free Windows TUs (capture/controller/settings_ui) need
+# <windows.h>, so the stock Linux clang-tidy can't see them. If an i686 mingw
+# toolchain is present, tidy them against the mingw target (no compile DB / no
+# OpenCV needed) with the FULL .clang-tidy config. Skipped (not failed) when the
+# toolchain is absent. passthrough/preview/dllmain need OpenCV -> MSVC build only.
+gate "clang-tidy (OpenCV-free Windows TUs via mingw)"
 if command -v i686-w64-mingw32-g++ >/dev/null 2>&1; then
-    clang-tidy --checks='-*,modernize-avoid-c-arrays,cppcoreguidelines-pro-type-vararg' \
-        src/settings_ui.cpp src/capture.cpp src/controller.cpp -- \
+    clang-tidy src/settings_ui.cpp src/capture.cpp src/controller.cpp -- \
         --target=i686-w64-windows-gnu -std=c++23 -I src -DNOMINMAX -D_WIN32_WINNT=0x0601
     result $?
 else

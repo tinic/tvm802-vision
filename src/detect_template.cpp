@@ -48,8 +48,12 @@ static MarkResult detect_template_one_field(const cv::Mat& g, const cv::Mat& tb,
     const double imgMean = cv::mean(g)[0];
     const double meanLo = adj.meanLo > 0.0 ? adj.meanLo : kTmpl.meanLo;
     const double meanHi = adj.meanHi > 0.0 ? adj.meanHi : kTmpl.meanHi;
-    if (imgMean < meanLo || imgMean > meanHi) return r;  // dropped/blown
-    if (tb.cols >= g.cols || tb.rows >= g.rows) return r;
+    if (imgMean < meanLo || imgMean > meanHi) {
+        return r;  // dropped/blown
+    }
+    if (tb.cols >= g.cols || tb.rows >= g.rows) {
+        return r;
+    }
 
     cv::Mat gb;
     const int gk = blur_kernel(adj.blur, kTmpl.blurKernel);  // SAME kernel as the template prep
@@ -61,8 +65,10 @@ static MarkResult detect_template_one_field(const cv::Mat& g, const cv::Mat& tb,
     const double ry = (refY >= 0.0) ? refY : g.rows / 2.0;
     const int sr = (searchRadiusPx > kTmpl.searchMinPx) ? searchRadiusPx : kTmpl.searchFallbackPx;
     const int R = sr + size / 2 + kTmpl.roiPad;
-    cv::Rect crop = cv::Rect(cvRound(rx) - R, cvRound(ry) - R, 2 * R, 2 * R) & cv::Rect(0, 0, g.cols, g.rows);
-    if (crop.width < size + 2 || crop.height < size + 2) return r;
+    const cv::Rect crop = cv::Rect(cvRound(rx) - R, cvRound(ry) - R, 2 * R, 2 * R) & cv::Rect(0, 0, g.cols, g.rows);
+    if (crop.width < size + 2 || crop.height < size + 2) {
+        return r;
+    }
 
     // Multi-scale SQDIFF: the red ring light blooms the mark differently between
     // template capture and runtime, and matchTemplate is NOT scale-invariant.
@@ -70,11 +76,13 @@ static MarkResult detect_template_one_field(const cv::Mat& g, const cv::Mat& tb,
     // first good match (ioScale) and only re-sweep if it degrades -- across the
     // two fields this means the even field sweeps and the odd reuses the lock.
     const cv::Mat cropImg = gb(crop);
-    double bestVal = 2.0, bestScl = 1.0;
+    double bestVal = 2.0;
+    double bestScl = 1.0;
     cv::Point bestLoc;
-    int bestW = tb.cols, bestH = tb.rows;
+    int bestW = tb.cols;
+    int bestH = tb.rows;
     cv::Mat bestResult;
-    const bool locked = (ioScale && *ioScale >= kTmpl.scaleLockLo && *ioScale <= kTmpl.scaleLockHi);
+    const bool locked = ((ioScale != nullptr) && *ioScale >= kTmpl.scaleLockLo && *ioScale <= kTmpl.scaleLockHi);
     for (int pass = 0; pass < 2; ++pass) {
         const double a = (locked && pass == 0) ? *ioScale : kTmpl.scaleSweepLo;
         const double b = (locked && pass == 0) ? *ioScale : kTmpl.scaleSweepHi;
@@ -82,12 +90,15 @@ static MarkResult detect_template_one_field(const cv::Mat& g, const cv::Mat& tb,
         for (int si = 0; si < nScl; ++si) {
             const double scl = a + si * kTmpl.scaleStep;
             cv::Mat ts;
-            if (std::fabs(scl - 1.0) < 1e-6)
+            if (std::fabs(scl - 1.0) < 1e-6) {
                 ts = tb;
-            else
+            } else {
                 cv::resize(tb, ts, cv::Size(), scl, scl, scl < 1.0 ? cv::INTER_AREA : cv::INTER_LINEAR);
+            }
             if (ts.cols < kTmpl.minTemplateDim || ts.rows < kTmpl.minTemplateDim ||
-                ts.cols >= cropImg.cols || ts.rows >= cropImg.rows) continue;
+                ts.cols >= cropImg.cols || ts.rows >= cropImg.rows) {
+                continue;
+            }
             cv::Mat res;
             cv::matchTemplate(cropImg, ts, res, cv::TM_SQDIFF_NORMED);
             // Honor the Range as a CIRCLE: accept only peaks whose matched
@@ -96,8 +107,10 @@ static MarkResult detect_template_one_field(const cv::Mat& g, const cv::Mat& tb,
             const cv::Point mc(cvRound(rx) - crop.x - ts.cols / 2,
                                cvRound(ry) - crop.y - ts.rows / 2);
             cv::circle(mask, mc, sr, cv::Scalar(255), -1);
-            if (cv::countNonZero(mask) == 0) continue;
-            double mn;
+            if (cv::countNonZero(mask) == 0) {
+                continue;
+            }
+            double mn = NAN;
             cv::Point ml;
             cv::minMaxLoc(res, &mn, nullptr, &ml, nullptr, mask);
             if (mn < bestVal) {
@@ -109,7 +122,9 @@ static MarkResult detect_template_one_field(const cv::Mat& g, const cv::Mat& tb,
                 bestResult = res;
             }
         }
-        if (!(locked && pass == 0 && bestVal > kTmpl.scaleResweepThresh)) break;  // locked scale OK, or full sweep done
+        if (!(locked && pass == 0 && bestVal > kTmpl.scaleResweepThresh)) {
+            break;  // locked scale OK, or full sweep done
+        }
         bestVal = 2.0;
         bestResult.release();  // stale lock -> full re-sweep
     }
@@ -118,21 +133,34 @@ static MarkResult detect_template_one_field(const cv::Mat& g, const cv::Mat& tb,
     const int s = (strength >= kTmpl.strengthLo && strength <= kTmpl.strengthHi)
                       ? strength
                       : kTmpl.strengthDefault;
-    if (bestResult.empty() || bestVal > kTmpl.acceptBase - kTmpl.acceptPerStrength * s) return r;
-    if (ioScale) *ioScale = bestScl;  // remember the working scale
+    if (bestResult.empty() || bestVal > kTmpl.acceptBase - kTmpl.acceptPerStrength * s) {
+        return r;
+    }
+    if (ioScale != nullptr) {
+        *ioScale = bestScl;  // remember the working scale
+    }
 
     // Parabolic sub-pixel refine on the best-scale SQDIFF surface (shape-agnostic).
     const cv::Point ml = bestLoc;
-    double dx = 0.0, dy = 0.0;
+    double dx = 0.0;
+    double dy = 0.0;
     if (ml.x > 0 && ml.x < bestResult.cols - 1) {
-        const double a = bestResult.at<float>(ml.y, ml.x - 1), b = bestResult.at<float>(ml.y, ml.x),
-                     c = bestResult.at<float>(ml.y, ml.x + 1), den = a - 2 * b + c;
-        if (std::fabs(den) > 1e-6) dx = 0.5 * (a - c) / den;
+        const double a = bestResult.at<float>(ml.y, ml.x - 1);
+        const double b = bestResult.at<float>(ml.y, ml.x);
+        const double c = bestResult.at<float>(ml.y, ml.x + 1);
+        const double den = a - 2 * b + c;
+        if (std::fabs(den) > 1e-6) {
+            dx = 0.5 * (a - c) / den;
+        }
     }
     if (ml.y > 0 && ml.y < bestResult.rows - 1) {
-        const double a = bestResult.at<float>(ml.y - 1, ml.x), b = bestResult.at<float>(ml.y, ml.x),
-                     c = bestResult.at<float>(ml.y + 1, ml.x), den = a - 2 * b + c;
-        if (std::fabs(den) > 1e-6) dy = 0.5 * (a - c) / den;
+        const double a = bestResult.at<float>(ml.y - 1, ml.x);
+        const double b = bestResult.at<float>(ml.y, ml.x);
+        const double c = bestResult.at<float>(ml.y + 1, ml.x);
+        const double den = a - 2 * b + c;
+        if (std::fabs(den) > 1e-6) {
+            dy = 0.5 * (a - c) / den;
+        }
     }
 
     r.found = true;
@@ -162,8 +190,9 @@ MarkResult detect_template_mark(const void* frame, const unsigned char* template
                                 double* ioScale) {
     // No template yet: still parse the header / hash via detect_with_fields so the
     // frame is logged, but report not-found.
-    if (!templateBytes || size < 4)
+    if ((templateBytes == nullptr) || size < 4) {
         return detect_with_fields(frame, [](const cv::Mat&) { return MarkResult(); });
+    }
 
     // Prep the template ONCE (outside the per-field loop): plane0 (gray, aligned
     // stride), 180-deg flipped (the host stores it rotated 180° relative to our
@@ -176,6 +205,9 @@ MarkResult detect_template_mark(const void* frame, const unsigned char* template
     try {
         const int step = (size + 3) & ~3;
         cv::Mat templ;
+        // cv::Mat has no const-data constructor; we copyTo out immediately and never
+        // write through this view, so dropping const to match the API is safe here.
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast)
         cv::Mat(size, size, CV_8UC1, const_cast<unsigned char*>(templateBytes),
                 static_cast<size_t>(step))
             .copyTo(templ);
@@ -187,8 +219,9 @@ MarkResult detect_template_mark(const void* frame, const unsigned char* template
         tb.release();  // malformed template -> fall through to the not-found path
     }
     // Prep failed (or produced nothing): still parse/log the frame, report not-found.
-    if (tb.empty())
+    if (tb.empty()) {
         return detect_with_fields(frame, [](const cv::Mat&) { return MarkResult(); });
+    }
 
     MarkResult r = detect_with_fields(frame, [&](const cv::Mat& g) {
         return detect_template_one_field(g, tb, size, strength, refX, refY,

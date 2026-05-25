@@ -1,26 +1,51 @@
 # clang-tidy config for tvm802-vision.
 #
-# Enforced in CI (the `lint` job) and by tools/check.sh on the PORTABLE,
-# Windows-free translation units (src/detect_*.cpp, src/settings.cpp). The
-# Windows-GDI translation units (preview/passthrough/capture/controller/
-# settings_ui/dllmain) include <windows.h>, which clang-tidy can't parse on the
-# stock Linux runner: tools/check.sh tidies the OpenCV-free ones
-# (capture/controller/settings_ui) against the i686 mingw target when that
-# toolchain is present, and the MSVC /W4 /WX build covers the rest.
+# Enforced in CI (the `lint` job, on the Windows-free TUs: src/detect_*.cpp +
+# src/settings.cpp) and by tools/check.sh, which also tidies the OpenCV-free
+# Windows TUs (capture/controller/settings_ui) against the i686 mingw target
+# (the stock Linux clang-tidy can't parse <windows.h>); the MSVC /W4 /WX build
+# covers passthrough/preview/dllmain.
 #
-# The check set is kept tight and stable (static analyzer + bugprone +
-# performance, plus a modernization gate: no C-style arrays, no C vararg calls
-# such as snprintf/printf -- use std::array and std::format instead) so it
-# doesn't drift across clang-tidy versions; two noisy / low-value checks excluded.
+# Check set = "everything" minus two groups of exclusions:
+#   1. Project-irrelevant or style-only checks (the constixel baseline:
+#      github.com/tinic/constixel/.clang-tidy) -- magic numbers, identifier
+#      length, trailing return types, etc. that don't fit dense CV/UI code.
+#   2. Checks inapplicable to a Win32/OpenCV drop-in DLL (would be permanent
+#      noise): include-cleaner fights the <windows.h>/OpenCV umbrella headers;
+#      reinterpret_cast / int-to-ptr are mandatory for HMENU / sockets / IplImage;
+#      non-const globals mirror the vendor DLL's shared-state ABI by design;
+#      use-anonymous-namespace -- file-`static` internal-linkage helpers are
+#      interleaved with the public exports, so a per-function anonymous namespace
+#      would add noise without benefit (the `static` idiom is clear and standard).
+# Braces ARE required (readability-braces-around-statements stays on): brace-less
+# bodies are merge-error-prone. .clang-format expands them to full blocks.
 Checks: >
-  -*,
-  clang-analyzer-*,
-  bugprone-*,
-  performance-*,
-  modernize-avoid-c-arrays,
-  cppcoreguidelines-pro-type-vararg,
+  *,
+  -altera-*,
+  -fuchsia-*,
+  -llvm*,
+  -hicpp-uppercase-literal-suffix,
+  -hicpp-signed-bitwise,
+  -misc-non-private-member-variables-in-classes,
+  -readability-magic-numbers,
+  -readability-function-cognitive-complexity,
+  -readability-uppercase-literal-suffix,
+  -readability-identifier-length,
+  -readability-simplify-boolean-expr,
+  -readability-math-missing-parentheses,
+  -cppcoreguidelines-avoid-magic-numbers,
+  -cppcoreguidelines-pro-bounds-pointer-arithmetic,
+  -cppcoreguidelines-pro-bounds-constant-array-index,
+  -modernize-use-trailing-return-type,
+  -modernize-use-std-numbers,
+  -performance-enum-size,
   -bugprone-easily-swappable-parameters,
-  -bugprone-narrowing-conversions
+  -misc-include-cleaner,
+  -misc-use-anonymous-namespace,
+  -cppcoreguidelines-pro-type-reinterpret-cast,
+  -cppcoreguidelines-avoid-non-const-global-variables,
+  -performance-no-int-to-ptr,
+  -android-cloexec-socket
 WarningsAsErrors: '*'
 HeaderFilterRegex: 'src/(vision|overlay|iplframe)\.h$'
 FormatStyle: file

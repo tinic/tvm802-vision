@@ -64,24 +64,32 @@ static MarkResult detect_one_field_circle(const cv::Mat& gFull, int minRfull, in
     cv::Rect crop(0, 0, gFull.cols, gFull.rows);
     if (refX >= 0.0 && refY >= 0.0) {
         const int R = sr + maxRfull + kCircle.roiPad;
-        cv::Rect c = cv::Rect(cvRound(rxF) - R, cvRound(ryF) - R, 2 * R, 2 * R) & cv::Rect(0, 0, gFull.cols, gFull.rows);
+        const cv::Rect c = cv::Rect(cvRound(rxF) - R, cvRound(ryF) - R, 2 * R, 2 * R) & cv::Rect(0, 0, gFull.cols, gFull.rows);
         const int slack = 2 * minRfull + kCircle.roiMinSlackPx;
-        if (c.width >= slack && c.height >= slack) crop = c;
+        if (c.width >= slack && c.height >= slack) {
+            crop = c;
+        }
     }
-    cv::Mat g = gFull(crop).clone();                          // owned copy; adjustments must not touch the source
-    apply_image_adjustments(g, adj);                          // optional UI image adjustments (no-op when neutral)
-    const double cxRef = rxF - crop.x, cyRef = ryF - crop.y;  // reference in crop coords
+    cv::Mat g = gFull(crop).clone();  // owned copy; adjustments must not touch the source
+    apply_image_adjustments(g, adj);  // optional UI image adjustments (no-op when neutral)
+    const double cxRef = rxF - crop.x;
+    const double cyRef = ryF - crop.y;  // reference in crop coords
 
     const double imgMean = cv::mean(g)[0];
     const double meanLo = adj.meanLo > 0.0 ? adj.meanLo : kCircle.meanLo;
     const double meanHi = adj.meanHi > 0.0 ? adj.meanHi : kCircle.meanHi;
-    if (imgMean < meanLo || imgMean > meanHi) return r;  // dropped/blown
+    if (imgMean < meanLo || imgMean > meanHi) {
+        return r;  // dropped/blown
+    }
 
     // Denoise -> illumination normalize -> light smooth. Denoise BEFORE CLAHE
     // (CLAHE amplifies noise). medianBlur kills analog impulse pixels; the
     // edge-preserving bilateral removes sensor noise without softening the
     // copper edge. bilateralFilter cannot run in-place: src (med) != dst (den).
-    cv::Mat med, den, norm, det;
+    cv::Mat med;
+    cv::Mat den;
+    cv::Mat norm;
+    cv::Mat det;
     cv::medianBlur(g, med, 3);
     cv::bilateralFilter(med, den, /*d*/ 5, /*sigmaColor*/ 25, /*sigmaSpace*/ 25);
     cv::createCLAHE(3.0, cv::Size(8, 8))->apply(den, norm);
@@ -92,26 +100,33 @@ static MarkResult detect_one_field_circle(const cv::Mat& gFull, int minRfull, in
     cv::HoughCircles(det, circles, cv::HOUGH_GRADIENT, kCircle.houghDp,
                      /*minDist*/ std::max(8.0, det.rows / 4.0), kCircle.houghParam1,
                      kCircle.houghParam2, minRfull, maxRfull);
-    if (circles.empty()) return r;
+    if (circles.empty()) {
+        return r;
+    }
 
     int best = 0;
     double bestD = 1e18;
     for (size_t i = 0; i < circles.size(); ++i) {
-        const double dx = circles[i][0] - cxRef, dy = circles[i][1] - cyRef;
+        const double dx = circles[i][0] - cxRef;
+        const double dy = circles[i][1] - cyRef;
         const double d = dx * dx + dy * dy;
         if (d < bestD) {
             bestD = d;
             best = static_cast<int>(i);
         }
     }
-    const size_t bi = static_cast<size_t>(best);
-    double fx = circles[bi][0], fy = circles[bi][1], fr = circles[bi][2];
+    const auto bi = static_cast<size_t>(best);
+    double fx = circles[bi][0];
+    double fy = circles[bi][1];
+    const double fr = circles[bi][2];
 
     // Search-area ("Range") constraint: reject detections too far from the ref.
     if (searchRadiusPx > 0) {
-        const double ddx = fx - cxRef, ddy = fy - cyRef;
-        if (ddx * ddx + ddy * ddy > double(searchRadiusPx) * searchRadiusPx)
+        const double ddx = fx - cxRef;
+        const double ddy = fy - cyRef;
+        if (ddx * ddx + ddy * ddy > static_cast<double>(searchRadiusPx) * searchRadiusPx) {
             return r;
+        }
     }
 
     // Circularity: reject HoughCircles votes on rectangular pads (need a real
@@ -120,33 +135,48 @@ static MarkResult detect_one_field_circle(const cv::Mat& gFull, int minRfull, in
     double circQuality = 0.0;
     {
         const int N = kCircle.circSamples;
-        int hits = 0, valid = 0;
+        int hits = 0;
+        int valid = 0;
         for (int k = 0; k < N; ++k) {
-            const double a = 2.0 * CV_PI * k / N, ca = std::cos(a), sa = std::sin(a);
+            const double a = 2.0 * CV_PI * k / N;
+            const double ca = std::cos(a);
+            const double sa = std::sin(a);
             const int xin = cvRound(fx + (fr - kCircle.circRingDelta) * ca);
             const int yin = cvRound(fy + (fr - kCircle.circRingDelta) * sa);
             const int xou = cvRound(fx + (fr + kCircle.circRingDelta) * ca);
             const int you = cvRound(fy + (fr + kCircle.circRingDelta) * sa);
-            if (xin < 0 || yin < 0 || xin >= det.cols || yin >= det.rows) continue;
-            if (xou < 0 || you < 0 || xou >= det.cols || you >= det.rows) continue;
+            if (xin < 0 || yin < 0 || xin >= det.cols || yin >= det.rows) {
+                continue;
+            }
+            if (xou < 0 || you < 0 || xou >= det.cols || you >= det.rows) {
+                continue;
+            }
             ++valid;
-            if (std::abs(int(det.at<uchar>(yin, xin)) - int(det.at<uchar>(you, xou))) > kCircle.circEdgeDelta)
+            if (std::abs(static_cast<int>(det.at<uchar>(yin, xin)) - static_cast<int>(det.at<uchar>(you, xou))) > kCircle.circEdgeDelta) {
                 ++hits;
+            }
         }
-        if (valid < N / 2 || hits < kCircle.circEdgeFrac * valid) return r;
-        circQuality = double(hits) / valid;
+        if (valid < N / 2 || hits < kCircle.circEdgeFrac * valid) {
+            return r;
+        }
+        circQuality = static_cast<double>(hits) / valid;
     }
 
     // Contrast gate: a real copper dot is a solid bright/dark blob vs annulus.
     {
-        const int rr = std::max(2, int(fr));
-        double sin_ = 0, sout = 0;
-        int nin = 0, nout = 0;
-        for (int dy = -rr - kCircle.contrastPad; dy <= rr + kCircle.contrastPad; ++dy)
+        const int rr = std::max(2, static_cast<int>(fr));
+        double sin_ = 0;
+        double sout = 0;
+        int nin = 0;
+        int nout = 0;
+        for (int dy = -rr - kCircle.contrastPad; dy <= rr + kCircle.contrastPad; ++dy) {
             for (int dx = -rr - kCircle.contrastPad; dx <= rr + kCircle.contrastPad; ++dx) {
-                const int xx = cvRound(fx) + dx, yy = cvRound(fy) + dy;
-                if (xx < 0 || yy < 0 || xx >= det.cols || yy >= det.rows) continue;
-                const double d2 = double(dx) * dx + double(dy) * dy;
+                const int xx = cvRound(fx) + dx;
+                const int yy = cvRound(fy) + dy;
+                if (xx < 0 || yy < 0 || xx >= det.cols || yy >= det.rows) {
+                    continue;
+                }
+                const double d2 = static_cast<double>(dx) * dx + static_cast<double>(dy) * dy;
                 if (d2 < kCircle.contrastInnerFrac * rr * rr) {
                     sin_ += det.at<uchar>(yy, xx);
                     ++nin;
@@ -156,9 +186,11 @@ static MarkResult detect_one_field_circle(const cv::Mat& gFull, int minRfull, in
                     ++nout;
                 }
             }
+        }
         if (nin > 0 && nout > 0 &&
-            std::abs(sin_ / nin - sout / nout) < kCircle.contrastMinDelta)
+            std::abs(sin_ / nin - sout / nout) < kCircle.contrastMinDelta) {
             return r;
+        }
     }
 
     // Sub-pixel refine: intensity-weighted centroid around the Hough center.
@@ -173,13 +205,20 @@ static MarkResult detect_one_field_circle(const cv::Mat& gFull, int minRfull, in
         cv::threshold(w, w, 0.0, 0.0, cv::THRESH_TOZERO);
         const double sw = cv::sum(w)[0];
         if (sw > 1.0) {
-            cv::Mat colW, rowW;
+            cv::Mat colW;
+            cv::Mat rowW;
             cv::reduce(w, colW, 0, cv::REDUCE_SUM, CV_64F);
             cv::reduce(w, rowW, 1, cv::REDUCE_SUM, CV_64F);
-            double sx = 0, sy = 0;
-            for (int x = 0; x < colW.cols; ++x) sx += colW.at<double>(0, x) * x;
-            for (int y = 0; y < rowW.rows; ++y) sy += rowW.at<double>(y, 0) * y;
-            const double rx = roi.x + sx / sw, ry = roi.y + sy / sw;
+            double sx = 0;
+            double sy = 0;
+            for (int x = 0; x < colW.cols; ++x) {
+                sx += colW.at<double>(0, x) * x;
+            }
+            for (int y = 0; y < rowW.rows; ++y) {
+                sy += rowW.at<double>(y, 0) * y;
+            }
+            const double rx = roi.x + sx / sw;
+            const double ry = roi.y + sy / sw;
             if (std::abs(rx - fx) <= fr * kCircle.refineMaxShiftFrac &&
                 std::abs(ry - fy) <= fr * kCircle.refineMaxShiftFrac) {
                 fx = rx;
@@ -200,7 +239,8 @@ static MarkResult detect_one_field_circle(const cv::Mat& gFull, int minRfull, in
 // inner 1mm copper (excludes the larger solder-mask ring -> no flip-flop jitter).
 static MarkResult detect_one_field(const cv::Mat& gFull, int markSizePx,
                                    double refX, double refY, int searchRadiusPx) {
-    int minRfull, maxRfull;
+    int minRfull = 0;
+    int maxRfull = 0;
     if (markSizePx >= kCircle.markSizeLo && markSizePx <= kCircle.markSizeHi) {
         minRfull = std::max(kCircle.radiusMinPx,
                             static_cast<int>(markSizePx * kCircle.radiusMinFrac));
@@ -212,9 +252,15 @@ static MarkResult detect_one_field(const cv::Mat& gFull, int markSizePx,
     // Settings override (the settings UI's radius bracket replaces the size-derived
     // one, so a user whose px/mm or fiducial size differs can fix detection live).
     const Settings cfg = get_settings(MODE_CIRCULAR);
-    if (cfg.radiusMinPx > 0.0) minRfull = static_cast<int>(cfg.radiusMinPx);
-    if (cfg.radiusMaxPx > 0.0) maxRfull = static_cast<int>(cfg.radiusMaxPx);
-    if (maxRfull <= minRfull) maxRfull = minRfull + 1;  // guard against an inverted bracket
+    if (cfg.radiusMinPx > 0.0) {
+        minRfull = static_cast<int>(cfg.radiusMinPx);
+    }
+    if (cfg.radiusMaxPx > 0.0) {
+        maxRfull = static_cast<int>(cfg.radiusMaxPx);
+    }
+    if (maxRfull <= minRfull) {
+        maxRfull = minRfull + 1;  // guard against an inverted bracket
+    }
     return detect_one_field_circle(gFull, minRfull, maxRfull, refX, refY, searchRadiusPx, cfg);
 }
 

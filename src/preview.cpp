@@ -12,6 +12,7 @@
 #include "iplframe.h"
 #include "settings.h"
 
+#include <algorithm>
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 
@@ -25,7 +26,9 @@ namespace vis {
 
 bool render_preview(const void* frame, void* hwndV, double mvoX, double mvoY,
                     int searchRadiusPx, const MarkResult& mr) {
-    if (!hwndV) return false;
+    if (hwndV == nullptr) {
+        return false;
+    }
     HWND hwnd = reinterpret_cast<HWND>(hwndV);
 
     // Build the final overlay image FIRST. ALL OpenCV work happens here, before
@@ -33,28 +36,34 @@ bool render_preview(const void* frame, void* hwndV, double mvoX, double mvoY,
     // and (b) the whole body is a no-throw barrier — the host calls us across a
     // plain C ABI, where an unwinding exception would be undefined behavior.
     cv::Mat work;
-    int cw = 0, ch = 0, rw = 0, rh = 0;
+    int cw = 0;
+    int ch = 0;
+    int rw = 0;
+    int rh = 0;
     try {
         int origin = -1;
-        cv::Mat wrapped = detail::wrap_ipl(frame, origin);
-        if (wrapped.empty()) return false;
+        const cv::Mat wrapped = detail::wrap_ipl(frame, origin);
+        if (wrapped.empty()) {
+            return false;
+        }
 
         // ORIGIN: ignore the flag (the down-vision camera toggles it spuriously) and
         // treat the frame top-down, so the preview matches detection. TODO(origin):
         // not validated on this hardware -- revisit after the merge (see work item).
         (void)origin;
-        cv::Mat img = wrapped;
+        const cv::Mat& img = wrapped;
         // Show the SAME image the detector sees: extract gray on an OWNED copy (never
         // the live buffer), apply the UI image adjustments (no-op when neutral), then
         // colorize for the overlay. So dragging gamma/contrast/levels/sharpen is
         // visible in the preview, not just in the lock/no-lock readout.
         cv::Mat gray;
-        if (img.channels() == 1)
+        if (img.channels() == 1) {
             gray = img.clone();
-        else if (img.channels() == 3)
+        } else if (img.channels() == 3) {
             cv::extractChannel(img, gray, 0);  // mono capture: plane 0 == gray
-        else
+        } else {
             return false;
+        }
         const Settings pcfg = get_settings(get_status().mode);  // active mode's adjustments
         apply_image_adjustments(gray, pcfg);
         if (pcfg.blur > 0.0) {  // show an EXPLICIT pre-blur (Auto = detector default, not shown)
@@ -64,7 +73,8 @@ bool render_preview(const void* frame, void* hwndV, double mvoX, double mvoY,
         cv::Mat bgr;
         cv::cvtColor(gray, bgr, cv::COLOR_GRAY2BGR);
 
-        const int W = bgr.cols, H = bgr.rows;
+        const int W = bgr.cols;
+        const int H = bgr.rows;
         cv::Mat flipped;
         cv::flip(bgr, flipped, -1);  // 180 deg, matches the original mirror
 
@@ -72,8 +82,12 @@ bool render_preview(const void* frame, void* hwndV, double mvoX, double mvoY,
         GetClientRect(hwnd, &rc);  // window metrics only; no DC required
         rw = rc.right - rc.left;
         rh = rc.bottom - rc.top;
-        if (rw <= 0) rw = W;
-        if (rh <= 0) rh = H;
+        if (rw <= 0) {
+            rw = W;
+        }
+        if (rh <= 0) {
+            rh = H;
+        }
 
         // 1:1 NATIVE preview (no upscaling -> crisp overlay; a stretched crop
         // made the thin red lines blocky). Crop a window-sized region at native
@@ -81,25 +95,31 @@ bool render_preview(const void* frame, void* hwndV, double mvoX, double mvoY,
         // mvo offset so we never run off the frame (no replicated border), and
         // round the width down to a multiple of 4 so the cv::Mat row stride
         // (cw*3) is DIB-aligned.
-        const double cx = W / 2.0 + mvoX, cy = H / 2.0 + mvoY;  // reference, flipped coords
-        int marginW = W - 2 * static_cast<int>(std::ceil(std::abs(mvoX)));
-        int marginH = H - 2 * static_cast<int>(std::ceil(std::abs(mvoY)));
+        const double cx = W / 2.0 + mvoX;
+        const double cy = H / 2.0 + mvoY;  // reference, flipped coords
+        const int marginW = W - 2 * static_cast<int>(std::ceil(std::abs(mvoX)));
+        const int marginH = H - 2 * static_cast<int>(std::ceil(std::abs(mvoY)));
         cw = std::min(rw, marginW > 16 ? marginW : W);
         ch = std::min(rh, marginH > 16 ? marginH : H);
         cw &= ~3;  // multiple of 4 -> DIB row aligned
-        if (cw < 16 || ch < 16) return false;
+        if (cw < 16 || ch < 16) {
+            return false;
+        }
 
         cv::getRectSubPix(flipped, cv::Size(cw, ch),
-                          cv::Point2f((float)cx, (float)cy), work);
-        if (work.type() != CV_8UC3) return false;
+                          cv::Point2f(static_cast<float>(cx), static_cast<float>(cy)), work);
+        if (work.type() != CV_8UC3) {
+            return false;
+        }
 
         const int RT = 1;  // red overlay thickness -- 1px, antialiased on the 1:1 display
         // Reference crosshair (red) at the crop center == the reference point.
         cv::line(work, cv::Point(cw / 2, 0), cv::Point(cw / 2, ch), cv::Scalar(0, 0, 255), RT, cv::LINE_AA);
         cv::line(work, cv::Point(0, ch / 2), cv::Point(cw, ch / 2), cv::Scalar(0, 0, 255), RT, cv::LINE_AA);
         // Search-area ("Range") circle (red) — detection is limited to inside this.
-        if (searchRadiusPx > 0)
+        if (searchRadiusPx > 0) {
             cv::circle(work, cv::Point(cw / 2, ch / 2), searchRadiusPx, cv::Scalar(0, 0, 255), RT, cv::LINE_AA);
+        }
 
         // Tick marks along the crosshair every 0.25 mm, from the controller's px/mm
         // scale (down camera — this preview is the down-vision mark modes). Anisotropic:
@@ -107,29 +127,36 @@ bool render_preview(const void* frame, void* hwndV, double mvoX, double mvoY,
         // 1.0 mm > 0.5 mm > 0.25 mm. Absent until the background controller read lands.
         if (const CamScale sc = down_cam_scale(); sc.valid && sc.xMmPerPx > 0.0 && sc.yMmPerPx > 0.0) {
             const cv::Scalar red(0, 0, 255);
-            const int cxp = cw / 2, cyp = ch / 2;
+            const int cxp = cw / 2;
+            const int cyp = ch / 2;
             const double pxQX = 0.25 / sc.xMmPerPx;  // px per 0.25 mm, horizontal
             const double pxQY = 0.25 / sc.yMmPerPx;  // px per 0.25 mm, vertical
             auto tick_len = [](int n) { return (n % 4 == 0) ? 9 : (n % 2 == 0) ? 6
                                                                                : 3; };
             for (int n = 1; n < 1000; ++n) {
                 const int d = static_cast<int>(std::lround(n * pxQX));
-                if (cxp - d < 0 && cxp + d >= cw) break;
+                if (cxp - d < 0 && cxp + d >= cw) {
+                    break;
+                }
                 const int len = tick_len(n);  // 1.0 / 0.5 / 0.25 mm
                 for (int sgn = -1; sgn <= 1; sgn += 2) {
                     const int x = cxp + sgn * d;
-                    if (x >= 0 && x < cw)
+                    if (x >= 0 && x < cw) {
                         cv::line(work, cv::Point(x, cyp - len), cv::Point(x, cyp + len), red, RT, cv::LINE_AA);
+                    }
                 }
             }
             for (int n = 1; n < 1000; ++n) {
                 const int d = static_cast<int>(std::lround(n * pxQY));
-                if (cyp - d < 0 && cyp + d >= ch) break;
+                if (cyp - d < 0 && cyp + d >= ch) {
+                    break;
+                }
                 const int len = tick_len(n);
                 for (int sgn = -1; sgn <= 1; sgn += 2) {
                     const int y = cyp + sgn * d;
-                    if (y >= 0 && y < ch)
+                    if (y >= 0 && y < ch) {
                         cv::line(work, cv::Point(cxp - len, y), cv::Point(cxp + len, y), red, RT, cv::LINE_AA);
+                    }
                 }
             }
         }
@@ -144,10 +171,11 @@ bool render_preview(const void* frame, void* hwndV, double mvoX, double mvoY,
             const int v = cvRound((H - mr.cy) - cropTop);
             const int rad = cvRound(mr.radius);
             const cv::Scalar green(0, 255, 0);
-            if (mr.shape == MarkShape::Square)
+            if (mr.shape == MarkShape::Square) {
                 cv::rectangle(work, cv::Point(u - rad, v - rad), cv::Point(u + rad, v + rad), green, 1, cv::LINE_AA);
-            else
+            } else {
                 cv::circle(work, cv::Point(u, v), rad, green, 1, cv::LINE_AA);
+            }
             cv::drawMarker(work, cv::Point(u, v), green, cv::MARKER_CROSS, 14, 1, cv::LINE_AA);
         }
 
@@ -159,13 +187,15 @@ bool render_preview(const void* frame, void* hwndV, double mvoX, double mvoY,
             int baseline = 0;
             const cv::Size ts = cv::getTextSize(hint, cv::FONT_HERSHEY_SIMPLEX, 0.4, 1, &baseline);
             int hx = cw - ts.width - 6;
-            if (hx < 6) hx = 6;
+            hx = std::max(hx, 6);
             const cv::Point at(hx, ts.height + 6);
             cv::putText(work, hint, at, cv::FONT_HERSHEY_SIMPLEX, 0.4, cv::Scalar(0, 0, 0), 2, cv::LINE_AA);
             cv::putText(work, hint, at, cv::FONT_HERSHEY_SIMPLEX, 0.4, cv::Scalar(210, 210, 210), 1, cv::LINE_AA);
         }
 
-        if (!work.isContinuous()) work = work.clone();
+        if (!work.isContinuous()) {
+            work = work.clone();
+        }
     } catch (...) {
         return false;  // never let an OpenCV failure reach the host
     }
@@ -174,7 +204,9 @@ bool render_preview(const void* frame, void* hwndV, double mvoX, double mvoY,
     // leak. `work` is a continuous CV_8UC3 of size cw x ch (cw is a multiple of
     // 4, so the cw*3 row stride is DIB-aligned).
     HDC dc = GetDC(hwnd);
-    if (!dc) return false;
+    if (dc == nullptr) {
+        return false;
+    }
     BITMAPINFO bmi;
     ZeroMemory(&bmi, sizeof(bmi));
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -187,13 +219,13 @@ bool render_preview(const void* frame, void* hwndV, double mvoX, double mvoY,
     // border strips (only when the window is larger than the native crop).
     SetStretchBltMode(dc, COLORONCOLOR);
     StretchDIBits(dc, 0, 0, cw, ch, 0, 0, cw, ch, work.data, &bmi, DIB_RGB_COLORS, SRCCOPY);
-    HBRUSH black = (HBRUSH)GetStockObject(BLACK_BRUSH);
+    auto black = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
     if (rw > cw) {
-        RECT s{cw, 0, rw, rh};
+        const RECT s{cw, 0, rw, rh};
         FillRect(dc, &s, black);
     }
     if (rh > ch) {
-        RECT s{0, ch, cw, rh};
+        const RECT s{0, ch, cw, rh};
         FillRect(dc, &s, black);
     }
     ReleaseDC(hwnd, dc);

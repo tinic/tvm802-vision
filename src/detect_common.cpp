@@ -43,30 +43,45 @@ void assign_result(MarkResult& dst, const MarkResult& src) {
 
 unsigned int frame_hash(const void* frame) {
     const IplImage* ipl = as_valid_ipl(frame);
-    if (!ipl) return 0;
+    if (ipl == nullptr) {
+        return 0;
+    }
     unsigned int h = 2166136261u;  // FNV-1a offset basis
-    const unsigned char* d = reinterpret_cast<const unsigned char*>(ipl->imageData);
-    const int ws = ipl->widthStep, rowbytes = ipl->width * ipl->nChannels;
-    for (int y = 0; y < ipl->height; y += 37)
-        for (int x = 0; x < rowbytes; x += 17)
+    const auto* d = reinterpret_cast<const unsigned char*>(ipl->imageData);
+    const int ws = ipl->widthStep;
+    const int rowbytes = ipl->width * ipl->nChannels;
+    for (int y = 0; y < ipl->height; y += 37) {
+        for (int x = 0; x < rowbytes; x += 17) {
             h = (h ^ d[y * ws + x]) * 16777619u;
-    return h ? h : 1u;  // 0 reserved for invalid
+        }
+    }
+    return (h != 0u) ? h : 1u;  // 0 reserved for invalid
 }
 
 bool frame_size(const void* frame, int* w, int* h) {
     const IplImage* ipl = as_valid_ipl(frame);
-    if (!ipl) return false;
-    if (w) *w = ipl->width;
-    if (h) *h = ipl->height;
+    if (ipl == nullptr) {
+        return false;
+    }
+    if (w != nullptr) {
+        *w = ipl->width;
+    }
+    if (h != nullptr) {
+        *h = ipl->height;
+    }
     return true;
 }
 
 int blur_kernel(double setting, int dflt) {
-    if (setting <= 0.0) return dflt;  // Auto -> detector default
+    if (setting <= 0.0) {
+        return dflt;  // Auto -> detector default
+    }
     int k = static_cast<int>(std::lround(setting));
-    if (k < 3) k = 3;
-    if (k > 25) k = 25;
-    if ((k & 1) == 0) ++k;  // GaussianBlur requires an odd kernel
+    k = std::max(k, 3);
+    k = std::min(k, 25);
+    if ((k & 1) == 0) {
+        ++k;  // GaussianBlur requires an odd kernel
+    }
     return k;
 }
 
@@ -78,18 +93,28 @@ void apply_image_adjustments(cv::Mat& g, const Settings& s) {
     const bool doBri = std::abs(s.brightness) > 0.5;
     const bool doCon = s.contrast > 0.0 && std::abs(s.contrast - 1.0) > 1e-3;
     if (doGamma || doLevels || doBri || doCon) {
-        double lo = s.blackPoint / 255.0;
+        const double lo = s.blackPoint / 255.0;
         double hi = 1.0 - s.whitePoint / 255.0;
-        if (hi <= lo) hi = lo + 0.004;
+        if (hi <= lo) {
+            hi = lo + 0.004;
+        }
         const double bri = s.brightness / 255.0;
-        std::array<uchar, 256> lut;
+        std::array<uchar, 256> lut{};
         for (int i = 0; i < 256; ++i) {
             double v = static_cast<double>(i) / 255.0;
-            if (doGamma) v = std::pow(v < 0.0 ? 0.0 : v, s.gamma);
-            if (doLevels) v = (v - lo) / (hi - lo);
-            if (doBri) v += bri;
-            if (doCon) v = (v - 0.5) * s.contrast + 0.5;
-            v = v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v);  // clamped -> lround fits 0..255
+            if (doGamma) {
+                v = std::pow(v < 0.0 ? 0.0 : v, s.gamma);
+            }
+            if (doLevels) {
+                v = (v - lo) / (hi - lo);
+            }
+            if (doBri) {
+                v += bri;
+            }
+            if (doCon) {
+                v = (v - 0.5) * s.contrast + 0.5;
+            }
+            v = std::clamp(v, 0.0, 1.0);  // clamped -> lround fits 0..255
             lut[static_cast<size_t>(i)] = static_cast<uchar>(std::lround(v * 255.0));
         }
         const cv::Mat lutMat(1, 256, CV_8U, lut.data());
@@ -110,16 +135,20 @@ void apply_image_adjustments(cv::Mat& g, const Settings& s) {
 }
 
 bool save_frame(const void* frame, const char* path) {
-    if (!path) return false;
+    if (path == nullptr) {
+        return false;
+    }
     try {  // no-throw barrier: never let an OpenCV failure reach the host
         int origin = -1;
-        cv::Mat wrapped = wrap_ipl(frame, origin);
-        if (wrapped.empty()) return false;
+        const cv::Mat wrapped = wrap_ipl(frame, origin);
+        if (wrapped.empty()) {
+            return false;
+        }
         // ORIGIN: ignore the flag (treat top-down) so the captured PNG matches what
         // the detector sees -- offline tuning runs on these frames. TODO(origin):
         // not validated on this hardware -- revisit after the merge (see work item).
         (void)origin;
-        cv::Mat out = wrapped.clone();  // copy; never touch live buffer
+        const cv::Mat out = wrapped.clone();  // copy; never touch live buffer
         return cv::imwrite(path, out);
     } catch (...) {
         return false;
@@ -158,7 +187,9 @@ MarkResult detect_with_fields(
     MarkResult r;
 
     const IplImage* ipl = as_valid_ipl(frame);
-    if (!ipl) return r;
+    if (ipl == nullptr) {
+        return r;
+    }
 
     r.headerOk = true;
     r.imgW = ipl->width;
@@ -170,16 +201,18 @@ MarkResult detect_with_fields(
     // A frame too small to split into two fields would make the deinterlace
     // resize throw on a 0-row field. Real captures are 640x480; anything below a
     // few pixels is a malformed header -> report not-found rather than risk it.
-    if (ipl->height < 4 || ipl->width < 4) return r;
+    if (ipl->height < 4 || ipl->width < 4) {
+        return r;
+    }
 
     // EXCEPTION BARRIER: this module is called across a plain C ABI from the host
     // (SurfaceMount.exe). An OpenCV/STL exception (corrupt frame, out-of-memory,
     // failed assertion) unwinding past that boundary is undefined behavior. Catch
     // everything here and report "not found", which the host already handles.
     try {
-        cv::Mat wrapped(ipl->height, ipl->width,
-                        CV_MAKETYPE(CV_8U, ipl->nChannels),
-                        ipl->imageData, static_cast<size_t>(ipl->widthStep));
+        const cv::Mat wrapped(ipl->height, ipl->width,
+                              CV_MAKETYPE(CV_8U, ipl->nChannels),
+                              ipl->imageData, static_cast<size_t>(ipl->widthStep));
 
         // ORIGIN: we IGNORE the IplImage origin flag and treat the frame as
         // top-down. The down-vision camera toggles origin on camera-switch without
@@ -191,10 +224,11 @@ MarkResult detect_with_fields(
         // Frames are monochrome (B=G=R), so extractChannel(0) gives the same gray
         // as a BGR2GRAY weighted sum but cheaper (a plane copy, no arithmetic).
         cv::Mat gray;
-        if (img.channels() == 3)
+        if (img.channels() == 3) {
             cv::extractChannel(img, gray, 0);
-        else
+        } else {
             gray = img;
+        }
 
         // Deinterlace into even/odd fields. The fields are STRIDED VIEWS into gray
         // (every other row, step*2) -- cv::resize reads them directly, avoiding the
@@ -205,16 +239,20 @@ MarkResult detect_with_fields(
         const size_t step = gray.step[0];
         const cv::Mat evenF(gray.rows / 2, gray.cols, gray.type(), gray.data, step * 2);
         const cv::Mat oddF(gray.rows / 2, gray.cols, gray.type(), gray.data + step, step * 2);
-        cv::Mat evenU, oddU;
+        cv::Mat evenU;
+        cv::Mat oddU;
         cv::resize(evenF, evenU, cv::Size(gray.cols, gray.rows), 0, 0, cv::INTER_CUBIC);
         cv::resize(oddF, oddU, cv::Size(gray.cols, gray.rows), 0, 0, cv::INTER_CUBIC);
 
         // Interlace comb / motion metric on the woven frame, central region: the
         // fraction of "zigzag" pixels (deviating from both vertical neighbours the
         // same way). High => the two ~1/60s-apart fields are misaligned => moving.
-        const int cx0 = std::max(1, gray.cols / 2 - 150), cx1 = std::min(gray.cols - 1, gray.cols / 2 + 150);
-        const int cy0 = std::max(1, gray.rows / 2 - 120), cy1 = std::min(gray.rows - 1, gray.rows / 2 + 120);
-        long comb = 0, total = 0;
+        const int cx0 = std::max(1, gray.cols / 2 - 150);
+        const int cx1 = std::min(gray.cols - 1, gray.cols / 2 + 150);
+        const int cy0 = std::max(1, gray.rows / 2 - 120);
+        const int cy1 = std::min(gray.rows - 1, gray.rows / 2 + 120);
+        int comb = 0;
+        int total = 0;
         for (int y = cy0; y < cy1; ++y) {
             const uchar* rm = gray.ptr<uchar>(y);
             const uchar* ra = gray.ptr<uchar>(y - 1);
@@ -222,7 +260,9 @@ MarkResult detect_with_fields(
             for (int x = cx0; x < cx1; ++x) {
                 const int d1 = static_cast<int>(rm[x]) - static_cast<int>(ra[x]);
                 const int d2 = static_cast<int>(rm[x]) - static_cast<int>(rb[x]);
-                if (d1 * d2 > kCombPixThresh) ++comb;
+                if (d1 * d2 > kCombPixThresh) {
+                    ++comb;
+                }
                 ++total;
             }
         }
@@ -239,17 +279,24 @@ MarkResult detect_with_fields(
             }
         } else if (wovenWhenSettled) {
             // SETTLED, contour (Round): the sharp full-res woven frame.
-            MarkResult rw = perField(gray);
-            if (rw.found) assign_result(r, rw);
+            const MarkResult rw = perField(gray);
+            if (rw.found) {
+                assign_result(r, rw);
+            }
         } else {
             // SETTLED, Circular/ImageTemplate: the validated two-field AVERAGE --
             // robust to residual ring-down and halves the sub-pixel scatter.
             MarkResult re = perField(evenU);
             MarkResult ro = perField(oddU);
-            if (re.found) re.cy -= 0.5;  // even field samples rows 2i   -> full-frame y
-            if (ro.found) ro.cy += 0.5;  // odd  field samples rows 2i+1 -> full-frame y
+            if (re.found) {
+                re.cy -= 0.5;  // even field samples rows 2i   -> full-frame y
+            }
+            if (ro.found) {
+                ro.cy += 0.5;  // odd  field samples rows 2i+1 -> full-frame y
+            }
             if (re.found && ro.found) {
-                const double dx = re.cx - ro.cx, dy = re.cy - ro.cy;
+                const double dx = re.cx - ro.cx;
+                const double dy = re.cy - ro.cy;
                 if (dx * dx + dy * dy <= kSettleAgreePx * kSettleAgreePx) {
                     r.found = true;
                     r.cx = 0.5 * (re.cx + ro.cx);

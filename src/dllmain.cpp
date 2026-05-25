@@ -41,7 +41,9 @@ BOOL APIENTRY DllMain(HMODULE /*self*/, DWORD reason, LPVOID /*reserved*/) {
     switch (reason) {
         case DLL_PROCESS_ATTACH: {
             module = LoadLibraryW(L"MVision-orig.dll");
-            if (!module) return FALSE;
+            if (module == nullptr) {
+                return FALSE;
+            }
             if (!bind_originals(module)) {
                 FreeLibrary(module);
                 module = nullptr;
@@ -50,7 +52,7 @@ BOOL APIENTRY DllMain(HMODULE /*self*/, DWORD reason, LPVOID /*reserved*/) {
             break;
         }
         case DLL_PROCESS_DETACH:
-            if (module) {
+            if (module != nullptr) {
                 FreeLibrary(module);
                 module = nullptr;
             }

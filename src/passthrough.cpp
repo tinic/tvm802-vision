@@ -48,7 +48,7 @@ unsigned int g_lastFrameHash = 0;  // freshness guard: hash of the last frame se
 // host re-pushing the same template. The plane is a size x size 8-bit gray image,
 // widthStep aligned to 4.
 struct Template {
-    std::array<unsigned char, 16384> buf;
+    std::array<unsigned char, 16384> buf{};
     int sz = 0;  // 0 = nothing cached yet
     unsigned int hash = 0;
     double scale = 0.0;  // locked match scale (0 = re-sweep next detect)
@@ -56,17 +56,23 @@ struct Template {
 Template g_tmpl;
 unsigned int tmpl_hash(const unsigned char* p, size_t n) {
     unsigned int h = 2166136261u;
-    for (size_t i = 0; i < n; i += 7) h = (h ^ p[i]) * 16777619u;
-    return h ? h : 1u;
+    for (size_t i = 0; i < n; i += 7) {
+        h = (h ^ p[i]) * 16777619u;
+    }
+    return (h != 0u) ? h : 1u;
 }
 // Cache the host's template. No-op on a null / too-small / oversized buffer, or
 // when the same template is pushed again (which preserves the locked scale).
 void cache_template(const unsigned char* t, int sz) {
     const int step = (sz + 3) & ~3;
     const size_t n = static_cast<size_t>(step) * sz;
-    if (!t || sz < 4 || n > g_tmpl.buf.size()) return;
+    if ((t == nullptr) || sz < 4 || n > g_tmpl.buf.size()) {
+        return;
+    }
     const unsigned int h = tmpl_hash(t, n);
-    if (h == g_tmpl.hash && sz == g_tmpl.sz) return;  // unchanged -> keep scale lock
+    if (h == g_tmpl.hash && sz == g_tmpl.sz) {
+        return;  // unchanged -> keep scale lock
+    }
     std::memcpy(g_tmpl.buf.data(), t, n);
     g_tmpl.sz = sz;
     g_tmpl.hash = h;
@@ -164,7 +170,8 @@ void set_our_result(const vis::MarkResult& mr) {
 // W/H=size, A=angle). Calibration-pending (see the kUp* constants); only reached
 // when kCompDrive is true.
 void set_our_comp_result(const vis::CompResult& cr) {
-    const double cxC = cr.imgW / 2.0, cyC = cr.imgH / 2.0;
+    const double cxC = cr.imgW / 2.0;
+    const double cyC = cr.imgH / 2.0;
     const double dx = kUpMirrorX ? (cxC - cr.cx) : (cr.cx - cxC);
     const double dy = kUpMirrorY ? (cyC - cr.cy) : (cr.cy - cyC);
     g_compX = dx * kUpScale;
@@ -185,13 +192,18 @@ void set_our_comp_result(const vis::CompResult& cr) {
 // drives placement.
 void maybe_log(const void* frame, const char* func, int algo, int range,
                const vis::MarkResult& mr, const vis::MarkResult* shadow = nullptr) {
-    if (!cap::armed()) return;
+    if (!cap::armed()) {
+        return;
+    }
     int idx = cap::next_index();
-    if (idx < 0) return;
+    if (idx < 0) {
+        return;
+    }
     // PNG save is opt-in (separate 'frames' trigger): imwrite is the heavy part
     // and adds latency to the detection path, so log-only runs stay responsive.
-    if (cap::frames_enabled())
+    if (cap::frames_enabled()) {
         vis::save_frame(frame, std::format("{}\\frame_{:04d}.png", cap::dir(), idx).c_str());
+    }
 
     std::string line = std::format(
         "{:04d},{},algo={},range={},mvo={:.1f}/{:.1f},area={}/{},"
@@ -202,9 +214,10 @@ void maybe_log(const void* frame, const char* func, int algo, int range,
         mr.found ? 1 : 0, mr.cx, mr.cy, g_ourW, g_ourH, g_ourMin,
         g_qfMs, g_detMs, g_renderMs,
         mr.headerOk ? 1 : 0, mr.imgW, mr.imgH, mr.imgOrigin, mr.frameHash);
-    if (shadow)
+    if (shadow != nullptr) {
         line += std::format(",csym,found={},cx={:.2f},cy={:.2f},score={:.3f}",
                             shadow->found ? 1 : 0, shadow->cx, shadow->cy, shadow->quality);
+    }
     cap::log_line(line);
 }
 
@@ -212,7 +225,8 @@ void maybe_log(const void* frame, const char* func, int algo, int range,
 // frame center minus the markVisionOffset. Derived from the frame's actual
 // dimensions, falling back to the default geometry if the header can't be read.
 void reference_point(const void* frame, double* refX, double* refY) {
-    int w = kDefaultFrameW, h = kDefaultFrameH;
+    int w = kDefaultFrameW;
+    int h = kDefaultFrameH;
     vis::frame_size(frame, &w, &h);
     *refX = w / 2.0 - g_mvoX;
     *refY = h / 2.0 - g_mvoY;
@@ -222,7 +236,8 @@ void reference_point(const void* frame, double* refX, double* refY) {
 // sits near the frame center (minus the up-vision offset). Used to seed/constrain
 // the component center search.
 void up_reference_point(const void* frame, double* refX, double* refY) {
-    int w = kDefaultFrameW, h = kDefaultFrameH;
+    int w = kDefaultFrameW;
+    int h = kDefaultFrameH;
     vis::frame_size(frame, &w, &h);
     *refX = w / 2.0 - g_upoX;
     *refY = h / 2.0 - g_upoY;
@@ -233,13 +248,23 @@ void up_reference_point(const void* frame, double* refX, double* refY) {
 // GetMin_val) for the SAME frame, plus the host inputs -- the dataset that
 // calibrates the comp packing (kUp* constants) and vets our detector vs the vendor.
 void maybe_log_comp(const void* frame, const vis::CompResult& cr) {
-    if (!cap::comp_enabled()) return;
+    if (!cap::comp_enabled()) {
+        return;
+    }
     int idx = cap::next_index();
-    if (idx < 0) return;
-    if (cap::frames_enabled())
+    if (idx < 0) {
+        return;
+    }
+    if (cap::frames_enabled()) {
         vis::save_frame(frame, std::format("{}\\comp_{:04d}.png", cap::dir(), idx).c_str());
+    }
     // The original's result (it ran in shadow mode, or for its preview side effect).
-    double ox = 0, oy = 0, ow = 0, oh = 0, oa = 0, omin = 1.0;
+    double ox = 0;
+    double oy = 0;
+    double ow = 0;
+    double oh = 0;
+    double oa = 0;
+    double omin = 1.0;
     mv::orig::GetOffset(&ox, &oy, &ow, &oh, &oa);
     mv::orig::GetMin_val(&omin);
 
@@ -278,14 +303,15 @@ template <class Detect, class OrigRender>
 int run_mark_check(const void* f, int hwnd, const char* name, int logAlgo, int logRange,
                    Detect&& detect, OrigRender&& origRender,
                    const std::function<vis::MarkResult(double, double, int)>& shadow = {}) {
-    double refX = 0.0, refY = 0.0;
+    double refX = 0.0;
+    double refY = 0.0;
     reference_point(f, &refX, &refY);
     const int searchR = (g_areaMin > kAreaMinPx && g_areaMin < kAreaMaxPx)
                             ? g_areaMin
                             : kDefaultSearchPx;
 
     auto t0 = clk::now();
-    vis::MarkResult mr = detect(refX, refY, searchR);  // read-only
+    const vis::MarkResult mr = detect(refX, refY, searchR);  // read-only
     g_detMs = ms_since(t0);
 
     set_our_result(mr);  // our offset drives placement
@@ -309,12 +335,15 @@ int run_mark_check(const void* f, int hwnd, const char* name, int logAlgo, int l
     // costs nothing in production.
     vis::MarkResult shadowMr;
     const bool haveShadow = static_cast<bool>(shadow) && cap::armed();
-    if (haveShadow) shadowMr = shadow(refX, refY, searchR);
+    if (haveShadow) {
+        shadowMr = shadow(refX, refY, searchR);
+    }
 
     auto t1 = clk::now();
     if (!vis::render_preview(f, reinterpret_cast<void*>(static_cast<intptr_t>(hwnd)),
-                             g_mvoX, g_mvoY, searchR, mr))
+                             g_mvoX, g_mvoY, searchR, mr)) {
         origRender();  // fall back to the original's render
+    }
     g_renderMs = ms_since(t1);
 
     maybe_log(f, name, logAlgo, logRange, mr, haveShadow ? &shadowMr : nullptr);
@@ -367,8 +396,8 @@ void* __stdcall QueryFrame(void* cam, int timeout) {
     while (h != 0 && newCount < kTarget && clk::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
         void* r2 = mv::orig::QueryFrame(cam, timeout);
-        unsigned int h2 = vis::frame_hash(r2);
-        if (r2 && h2 != 0) {
+        const unsigned int h2 = vis::frame_hash(r2);
+        if ((r2 != nullptr) && h2 != 0) {
             r = r2;
             if (h2 != cur) {
                 ++newCount;
@@ -377,7 +406,9 @@ void* __stdcall QueryFrame(void* cam, int timeout) {
             h = h2;
         }
     }
-    if (h != 0) g_lastFrameHash = h;
+    if (h != 0) {
+        g_lastFrameHash = h;
+    }
     g_qfMs = ms_since(t0);
     return r;
 }
@@ -401,7 +432,8 @@ int __stdcall CheckComp(void* f, int hwnd, int w, int h) {
     // Host expected-size prior -> px (soft; dropped if it converts to something
     // implausible, which just means the scale guess is off -- harmless, the detector
     // self-localizes without a prior).
-    int fw = kDefaultFrameW, fh = kDefaultFrameH;
+    int fw = kDefaultFrameW;
+    int fh = kDefaultFrameH;
     vis::frame_size(f, &fw, &fh);
     const double maxBody = 0.5 * static_cast<double>(fw < fh ? fw : fh);
     double expWpx = (g_compExpW > 0.0) ? g_compExpW / kUpScale : 0.0;
@@ -411,18 +443,19 @@ int __stdcall CheckComp(void* f, int hwnd, int w, int h) {
         expHpx = 0.0;
     }
 
-    double refX = 0.0, refY = 0.0;
+    double refX = 0.0;
+    double refY = 0.0;
     up_reference_point(f, &refX, &refY);
 
     auto t0 = clk::now();
-    vis::CompResult cr = vis::detect_component(f, expWpx, expHpx, g_compExpA,
-                                               g_compThreshold, refX, refY, 0);
+    const vis::CompResult cr = vis::detect_component(f, expWpx, expHpx, g_compExpA,
+                                                     g_compThreshold, refX, refY, 0);
     g_detMs = ms_since(t0);
 
     // `if constexpr` so the shadow-default build (kCompDrive=false) doesn't trip MSVC
     // C4127 (constant condition) under /WX; the drive branch is discarded but still
     // compiled, so set_our_comp_result stays referenced.
-    int rc;
+    int rc = 0;
     if constexpr (kCompDrive) {
         if (cr.found) {
             set_our_comp_result(cr);             // our pose drives via comp-mode GetOffset
@@ -498,9 +531,10 @@ int __stdcall CheckTemplate(void* f, int hwnd, int w, int h, unsigned char* t, i
     cache_template(t, sz);  // store the latest template (no-op on null/unchanged)
     return run_mark_check(f, hwnd, "CheckTemplate", sz, m, [&](double refX, double refY, int searchR) {
             vis::MarkResult mr;
-            if (g_tmpl.sz > 0)
+            if (g_tmpl.sz > 0) {
                 mr = vis::detect_template_mark(f, g_tmpl.buf.data(), g_tmpl.sz, th, m,
                                                refX, refY, searchR, &g_tmpl.scale);
+            }
             return mr; }, [&] { mv::orig::CheckTemplate(f, hwnd, w, h, t, sz, th, m); });
 }
 int __stdcall TemplateVision(void* f, int hwnd, int w, int h, unsigned char* t, int sz, double th, int m) {

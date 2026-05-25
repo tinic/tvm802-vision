@@ -53,16 +53,22 @@ static MarkResult detect_one_field_contour(const cv::Mat& gFull, double refX, do
     cv::Rect crop(0, 0, gFull.cols, gFull.rows);
     if (refX >= 0.0 && refY >= 0.0) {
         const int R = sr + kContour.roiPad;
-        cv::Rect c = cv::Rect(cvRound(rxF) - R, cvRound(ryF) - R, 2 * R, 2 * R) & cv::Rect(0, 0, gFull.cols, gFull.rows);
-        if (c.width > kContour.roiMinDimPx && c.height > kContour.roiMinDimPx) crop = c;
+        const cv::Rect c = cv::Rect(cvRound(rxF) - R, cvRound(ryF) - R, 2 * R, 2 * R) & cv::Rect(0, 0, gFull.cols, gFull.rows);
+        if (c.width > kContour.roiMinDimPx && c.height > kContour.roiMinDimPx) {
+            crop = c;
+        }
     }
     const cv::Mat g = gFull(crop);
-    const double cxRef = rxF - crop.x, cyRef = ryF - crop.y;
+    const double cxRef = rxF - crop.x;
+    const double cyRef = ryF - crop.y;
 
     const double imgMean = cv::mean(g)[0];
-    if (imgMean < kContour.meanLo || imgMean > kContour.meanHi) return r;  // dropped/blown
+    if (imgMean < kContour.meanLo || imgMean > kContour.meanHi) {
+        return r;  // dropped/blown
+    }
 
-    cv::Mat sm, edges;
+    cv::Mat sm;
+    cv::Mat edges;
     cv::GaussianBlur(g, sm, cv::Size(kContour.gaussKernel, kContour.gaussKernel), 0);
     const int cannyLo = kContour.cannyStep * sN + kContour.cannyBase;
     cv::Canny(sm, edges, cannyLo, cannyLo + kContour.cannyHighDelta, 3);
@@ -77,25 +83,39 @@ static MarkResult detect_one_field_contour(const cv::Mat& gFull, double refX, do
 
     std::vector<std::vector<cv::Point>> contours;
     cv::findContours(edges, contours, cv::RETR_LIST, cv::CHAIN_APPROX_NONE);
-    if (contours.empty()) return r;
+    if (contours.empty()) {
+        return r;
+    }
 
     const double minArea = CV_PI * kContour.minRadiusPx * kContour.minRadiusPx;
     int best = -1;
-    double bestQ = -1.0, bestD = 1e18, fr = 0.0;
+    double bestQ = -1.0;
+    double bestD = 1e18;
+    double fr = 0.0;
     for (size_t i = 0; i < contours.size(); ++i) {
         const std::vector<cv::Point>& c = contours[i];
         const double area = std::abs(cv::contourArea(c));
-        if (area < minArea) continue;
+        if (area < minArea) {
+            continue;
+        }
         cv::Point2f ec;
         float encR = 0.0f;
         cv::minEnclosingCircle(c, ec, encR);
-        if (encR < static_cast<float>(kContour.minRadiusPx) || encR > static_cast<float>(kContour.maxRadiusPx)) continue;
+        if (encR < static_cast<float>(kContour.minRadiusPx) || encR > static_cast<float>(kContour.maxRadiusPx)) {
+            continue;
+        }
         const double pr2 = CV_PI * encR * encR;
-        if (std::abs(pr2 - area) >= pr2 * kContour.circTol) continue;  // circularity
-        const double dx = ec.x - cxRef, dy = ec.y - cyRef, dist2 = dx * dx + dy * dy;
-        const double srd = static_cast<double>(searchRadiusPx);
-        if (searchRadiusPx > 0 && dist2 > srd * srd) continue;  // search-area gate
-        const double q = area / pr2;                            // ~1 = perfect circle
+        if (std::abs(pr2 - area) >= pr2 * kContour.circTol) {
+            continue;  // circularity
+        }
+        const double dx = ec.x - cxRef;
+        const double dy = ec.y - cyRef;
+        const double dist2 = dx * dx + dy * dy;
+        const auto srd = static_cast<double>(searchRadiusPx);
+        if (searchRadiusPx > 0 && dist2 > srd * srd) {
+            continue;  // search-area gate
+        }
+        const double q = area / pr2;  // ~1 = perfect circle
         if (q > bestQ + kContour.qTieBand || (q > bestQ - kContour.qTieBand && dist2 < bestD)) {
             bestQ = q;
             bestD = dist2;
@@ -103,11 +123,15 @@ static MarkResult detect_one_field_contour(const cv::Mat& gFull, double refX, do
             fr = encR;
         }
     }
-    if (best < 0) return r;  // nothing circular passed
+    if (best < 0) {
+        return r;  // nothing circular passed
+    }
 
     const std::vector<cv::Point>& win = contours[static_cast<size_t>(best)];
     const cv::Moments mm = cv::moments(win);
-    if (mm.m00 <= 0.0) return r;
+    if (mm.m00 <= 0.0) {
+        return r;
+    }
 
     r.found = true;
     r.cx = mm.m10 / mm.m00 + crop.x;
