@@ -11,7 +11,9 @@ sub-pixel-stable, motion-robust lock — even at high head speed.
 >
 > Developed and tested on a **TVM802B**. The 802A shares the same vision DLL and
 > analog capture path, so it should apply there too — but is **untested on the
-> 802A**; reports welcome.
+> 802A**; reports welcome. The **TVM802BX** is the same machine with a built-in PC +
+> touchscreen (a low-power Intel Atom — see *Prebuilt binary* for the build it needs
+> and why).
 
 ## What it does
 
@@ -60,9 +62,29 @@ Two builds are produced (same code, same ABI — pick one and rename it to
 `MVision.dll`):
 
 - **`MVision.dll`** — AVX2, recommended for any CPU from ~2015 on (Haswell / Zen+).
-- **`MVision-noavx2.dll`** — SSE2 baseline, for older CPUs. Use it if `MVision.dll`
-  crashes with an illegal-instruction fault. (OpenCV does its own runtime CPU
-  dispatch, so only our own code carries the AVX2 requirement.)
+  It self-checks at startup: on a CPU without AVX2 it pops a modal warning pointing
+  you to the no-AVX2 build, instead of faulting with a cryptic illegal instruction.
+- **`MVision-noavx2.dll`** — SSE2 baseline, for older CPUs. (OpenCV does its own
+  runtime CPU dispatch, so only our own emitted code carries the AVX2 requirement.)
+
+### Which build for which machine — mind the CPU
+
+The plain **802A / 802B** drive from *your* external PC: use the AVX2 build on
+anything ~2015 or newer, the no-AVX2 build on older silicon.
+
+The **TVM802BX** (built-in PC + touchscreen) is the one to watch. Its embedded
+computer has been reported (EEVblog teardown) as an **Intel Atom N2800** — *Cedar
+Trail / Saltwell, 2012; in-order dual-core + Hyper-Threading @ 1.86 GHz; 2 GB DDR3*.
+Its SIMD ceiling is **SSSE3 — no SSE4, no AVX, no AVX2, no FMA.** So on the BX you
+**must** use **`MVision-noavx2.dll`**; the AVX2 build cannot run there. (Other QiHe
+built-in boards may vary by batch, but expect a similar low-power Atom — check it
+with Task Manager / CPU-Z and use the no-AVX2 build unless it reports AVX2.)
+
+That N2800 is also slow and memory-bandwidth-limited, so on the BX keep the host
+**Range** small and prefer **Circular** over **Round** to keep the detector light.
+(The no-AVX2 baseline is plain **SSE2** on purpose: the N2800 predates SSE4, and SSE4
+measured *no* speedup for this gather-bound detector anyway — only AVX2's FMA helped,
+which that Atom lacks.)
 
 ## Build
 
