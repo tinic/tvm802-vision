@@ -377,103 +377,109 @@ void refresh_status() {
 }
 
 LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    switch (msg) {
-        case WM_CREATE: {
-            INITCOMMONCONTROLSEX icc{};
-            icc.dwSize = sizeof icc;
-            icc.dwICC = ICC_BAR_CLASSES;
-            InitCommonControlsEx(&icc);
+    // A window procedure must never let a C++ exception unwind into the Win32
+    // dispatcher (UB). The handlers use std::format/std::string, which can allocate,
+    // so contain everything and fall through to the default handler on failure.
+    try {
+        switch (msg) {
+            case WM_CREATE: {
+                INITCOMMONCONTROLSEX icc{};
+                icc.dwSize = sizeof icc;
+                icc.dwICC = ICC_BAR_CLASSES;
+                InitCommonControlsEx(&icc);
 
-            g_lblMode = make_static(hwnd, "Active mode:  (none yet)", 12, 8, 396, 18);
-            make_static(hwnd, "- Detection -", 12, 28, 200, 16);
-            make_static(hwnd, "- Image adjustments -", 12, 196, 240, 16);
+                g_lblMode = make_static(hwnd, "Active mode:  (none yet)", 12, 8, 396, 18);
+                make_static(hwnd, "- Detection -", 12, 28, 200, 16);
+                make_static(hwnd, "- Image adjustments -", 12, 196, 240, 16);
 
-            for (std::size_t i = 0; i < kDefs.size(); ++i) {
-                g_lblName[i] = make_static(hwnd, kDefs[i].label, 12, kDefs[i].y + 2, 90, 18);  // wide enough for "Exposure min"
-                g_tb[i] = CreateWindowExA(0, "msctls_trackbar32", "",
-                                          WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
-                                          106, kDefs[i].y, 176, 24, hwnd, nullptr, g_inst, nullptr);
-                SendMessageA(g_tb[i], TBM_SETRANGEMIN, FALSE, static_cast<LPARAM>(kDefs[i].lo));
-                SendMessageA(g_tb[i], TBM_SETRANGEMAX, TRUE, static_cast<LPARAM>(kDefs[i].hi));
-                g_lblVal[i] = make_static(hwnd, "Auto", 288, kDefs[i].y + 2, 124, 18);  // wide for "NN px (M.MM mm)"
-            }
-
-            g_chkMedian = CreateWindowExA(0, "BUTTON", "Median ring scoring (robust to glare)",
-                                          WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                                          12, 172, 340, 20, hwnd,
-                                          reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_CHK_MEDIAN)),
-                                          g_inst, nullptr);
-
-            g_lblStatus = make_static(hwnd, " NO LOCK", 12, 394, 396, 42);
-            // Center the bottom button row on the ACTUAL client width (computed, not
-            // hard-coded x positions) so it stays centered regardless of width / DPI.
-            constexpr int kBtnW = 80;
-            constexpr int kBtnH = 26;
-            constexpr int kBtnGap = 10;
-            constexpr int kBtnY = 446;
-            constexpr int kNBtn = 3;
-            RECT cr{};
-            GetClientRect(hwnd, &cr);
-            const int bx0 =
-                static_cast<int>((cr.right - (kNBtn * kBtnW + (kNBtn - 1) * kBtnGap)) / 2);
-            make_button(hwnd, ID_BTN_SAVE, "Save", bx0, kBtnY, kBtnW, kBtnH);
-            make_button(hwnd, ID_BTN_RESET, "Reset", bx0 + (kBtnW + kBtnGap), kBtnY, kBtnW, kBtnH);
-            make_button(hwnd, ID_BTN_CLOSE, "Close", bx0 + 2 * (kBtnW + kBtnGap), kBtnY, kBtnW, kBtnH);
-
-            {  // open showing the currently-active mode's settings
-                const int m0 = get_status().mode;
-                if (m0 >= MODE_ROUND && m0 <= MODE_TEMPLATE) {
-                    g_curMode = m0;
+                for (std::size_t i = 0; i < kDefs.size(); ++i) {
+                    g_lblName[i] = make_static(hwnd, kDefs[i].label, 12, kDefs[i].y + 2, 90, 18);  // wide enough for "Exposure min"
+                    g_tb[i] = CreateWindowExA(0, "msctls_trackbar32", "",
+                                              WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
+                                              106, kDefs[i].y, 176, 24, hwnd, nullptr, g_inst, nullptr);
+                    SendMessageA(g_tb[i], TBM_SETRANGEMIN, FALSE, static_cast<LPARAM>(kDefs[i].lo));
+                    SendMessageA(g_tb[i], TBM_SETRANGEMAX, TRUE, static_cast<LPARAM>(kDefs[i].hi));
+                    g_lblVal[i] = make_static(hwnd, "Auto", 288, kDefs[i].y + 2, 124, 18);  // wide for "NN px (M.MM mm)"
                 }
-            }
-            controls_from_settings();
-            if (g_font != nullptr) {  // host-matching font on every control
-                EnumChildWindows(hwnd, set_font_cb, reinterpret_cast<LPARAM>(g_font));
-                SendMessageA(hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(g_font), TRUE);
-            }
-            SetTimer(hwnd, static_cast<UINT_PTR>(ID_TIMER), 120, nullptr);
-            return 0;
-        }
-        case WM_HSCROLL:
-            apply_from_controls();
-            return 0;
-        case WM_TIMER:
-            refresh_status();
-            return 0;
-        case WM_CTLCOLORSTATIC: {
-            HWND ctl = reinterpret_cast<HWND>(lParam);
-            if (ctl == g_lblStatus) {
-                HDC hdc = reinterpret_cast<HDC>(wParam);
-                SetTextColor(hdc, RGB(255, 255, 255));
-                SetBkColor(hdc, g_lastFound ? RGB(40, 150, 60) : RGB(170, 50, 50));
-                return reinterpret_cast<LRESULT>(g_lastFound ? g_brGreen : g_brRed);
-            }
-            break;
-        }
-        case WM_COMMAND: {
-            const int id = LOWORD(wParam);
-            if (id == ID_BTN_SAVE) {
-                apply_from_controls();
-                save_settings(g_iniPath.c_str());
-            } else if (id == ID_BTN_RESET) {
-                set_settings(g_curMode, Settings{});  // reset only the current mode
+
+                g_chkMedian = CreateWindowExA(0, "BUTTON", "Median ring scoring (robust to glare)",
+                                              WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                                              12, 172, 340, 20, hwnd,
+                                              reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_CHK_MEDIAN)),
+                                              g_inst, nullptr);
+
+                g_lblStatus = make_static(hwnd, " NO LOCK", 12, 394, 396, 42);
+                // Center the bottom button row on the ACTUAL client width (computed, not
+                // hard-coded x positions) so it stays centered regardless of width / DPI.
+                constexpr int kBtnW = 80;
+                constexpr int kBtnH = 26;
+                constexpr int kBtnGap = 10;
+                constexpr int kBtnY = 446;
+                constexpr int kNBtn = 3;
+                RECT cr{};
+                GetClientRect(hwnd, &cr);
+                const int bx0 =
+                    static_cast<int>((cr.right - (kNBtn * kBtnW + (kNBtn - 1) * kBtnGap)) / 2);
+                make_button(hwnd, ID_BTN_SAVE, "Save", bx0, kBtnY, kBtnW, kBtnH);
+                make_button(hwnd, ID_BTN_RESET, "Reset", bx0 + (kBtnW + kBtnGap), kBtnY, kBtnW, kBtnH);
+                make_button(hwnd, ID_BTN_CLOSE, "Close", bx0 + 2 * (kBtnW + kBtnGap), kBtnY, kBtnW, kBtnH);
+
+                {  // open showing the currently-active mode's settings
+                    const int m0 = get_status().mode;
+                    if (m0 >= MODE_ROUND && m0 <= MODE_TEMPLATE) {
+                        g_curMode = m0;
+                    }
+                }
                 controls_from_settings();
-            } else if (id == ID_BTN_CLOSE) {
-                ShowWindow(hwnd, SW_HIDE);
-            } else if (id == ID_CHK_MEDIAN) {
-                apply_from_controls();  // checkbox toggled
+                if (g_font != nullptr) {  // host-matching font on every control
+                    EnumChildWindows(hwnd, set_font_cb, reinterpret_cast<LPARAM>(g_font));
+                    SendMessageA(hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(g_font), TRUE);
+                }
+                SetTimer(hwnd, static_cast<UINT_PTR>(ID_TIMER), 120, nullptr);
+                return 0;
             }
-            return 0;
+            case WM_HSCROLL:
+                apply_from_controls();
+                return 0;
+            case WM_TIMER:
+                refresh_status();
+                return 0;
+            case WM_CTLCOLORSTATIC: {
+                HWND ctl = reinterpret_cast<HWND>(lParam);
+                if (ctl == g_lblStatus) {
+                    HDC hdc = reinterpret_cast<HDC>(wParam);
+                    SetTextColor(hdc, RGB(255, 255, 255));
+                    SetBkColor(hdc, g_lastFound ? RGB(40, 150, 60) : RGB(170, 50, 50));
+                    return reinterpret_cast<LRESULT>(g_lastFound ? g_brGreen : g_brRed);
+                }
+                break;
+            }
+            case WM_COMMAND: {
+                const int id = LOWORD(wParam);
+                if (id == ID_BTN_SAVE) {
+                    apply_from_controls();
+                    save_settings(g_iniPath.c_str());
+                } else if (id == ID_BTN_RESET) {
+                    set_settings(g_curMode, Settings{});  // reset only the current mode
+                    controls_from_settings();
+                } else if (id == ID_BTN_CLOSE) {
+                    ShowWindow(hwnd, SW_HIDE);
+                } else if (id == ID_CHK_MEDIAN) {
+                    apply_from_controls();  // checkbox toggled
+                }
+                return 0;
+            }
+            case WM_CLOSE:
+                ShowWindow(hwnd, SW_HIDE);  // hide, don't destroy -> reopen via the hotkey
+                return 0;
+            case WM_DESTROY:
+                KillTimer(hwnd, static_cast<UINT_PTR>(ID_TIMER));
+                g_win = nullptr;
+                return 0;
+            default:
+                break;
         }
-        case WM_CLOSE:
-            ShowWindow(hwnd, SW_HIDE);  // hide, don't destroy -> reopen via the hotkey
-            return 0;
-        case WM_DESTROY:
-            KillTimer(hwnd, static_cast<UINT_PTR>(ID_TIMER));
-            g_win = nullptr;
-            return 0;
-        default:
-            break;
+    } catch (...) {  // NOLINT(bugprone-empty-catch) -- fall through to the default handler
     }
     return DefWindowProcA(hwnd, msg, wParam, lParam);
 }
@@ -546,11 +552,17 @@ void ui_thread() {
 void start_settings_ui() {
     static std::once_flag once;
     std::call_once(once, [] {
-        std::array<char, MAX_PATH> cwd{};
-        const DWORD n = GetCurrentDirectoryA(MAX_PATH, cwd.data());
-        g_iniPath = (n > 0 && n < MAX_PATH) ? std::string(cwd.data()) + "\\MVision.ini" : "MVision.ini";
-        load_settings(g_iniPath.c_str());  // apply persisted settings before the first detect
-        std::thread(ui_thread).detach();
+        // Runs inside QueryFrame's call_once on the HOST thread, so it must not throw
+        // across the C ABI: load_settings / std::string can allocate. Contain it.
+        try {
+            std::array<char, MAX_PATH> cwd{};
+            const DWORD n = GetCurrentDirectoryA(MAX_PATH, cwd.data());
+            g_iniPath =
+                (n > 0 && n < MAX_PATH) ? std::string(cwd.data()) + "\\MVision.ini" : "MVision.ini";
+            load_settings(g_iniPath.c_str());  // apply persisted settings before the first detect
+            std::thread(ui_thread).detach();
+        } catch (...) {  // NOLINT(bugprone-empty-catch) -- host thread; never throw across the C ABI
+        }
     });
 }
 

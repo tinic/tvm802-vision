@@ -29,6 +29,10 @@
 #include <string>
 #include <thread>
 
+#if defined(_MSC_VER) && !defined(__clang__)
+#include <intrin.h>  // __cpuidex for the AVX2 guard (MSVC); GCC/mingw uses a builtin
+#endif
+
 // Lightweight timing to locate the frame-rate bottleneck (QueryFrame vs our
 // detector vs our preview render). Logged per frame when capture is armed.
 namespace {
@@ -199,26 +203,31 @@ void maybe_log(const void* frame, const char* func, int algo, int range,
     if (idx < 0) {
         return;
     }
-    // PNG save is opt-in (separate 'frames' trigger): imwrite is the heavy part
-    // and adds latency to the detection path, so log-only runs stay responsive.
-    if (cap::frames_enabled()) {
-        vis::save_frame(frame, std::format("{}\\frame_{:04d}.png", cap::dir(), idx).c_str());
-    }
+    // Diagnostic logging must NEVER throw across the C ABI into the host: std::format
+    // can allocate (std::bad_alloc). Swallow any failure -- a lost log line is harmless.
+    try {
+        // PNG save is opt-in (separate 'frames' trigger): imwrite is the heavy part
+        // and adds latency to the detection path, so log-only runs stay responsive.
+        if (cap::frames_enabled()) {
+            vis::save_frame(frame, std::format("{}\\frame_{:04d}.png", cap::dir(), idx).c_str());
+        }
 
-    std::string line = std::format(
-        "{:04d},{},algo={},range={},mvo={:.1f}/{:.1f},area={}/{},"
-        "ours,found={},cx={:.2f},cy={:.2f},W={:.4f},H={:.4f},min={:.3f},"
-        "ms,queryFrame={:.1f},detect={:.1f},render={:.1f},"
-        "ipl,ok={},w={},h={},origin={},fhash={}",
-        idx, func, algo, range, g_mvoX, g_mvoY, g_areaMin, g_areaMax,
-        mr.found ? 1 : 0, mr.cx, mr.cy, g_ourW, g_ourH, g_ourMin,
-        g_qfMs, g_detMs, g_renderMs,
-        mr.headerOk ? 1 : 0, mr.imgW, mr.imgH, mr.imgOrigin, mr.frameHash);
-    if (shadow != nullptr) {
-        line += std::format(",csym,found={},cx={:.2f},cy={:.2f},score={:.3f}",
-                            shadow->found ? 1 : 0, shadow->cx, shadow->cy, shadow->quality);
+        std::string line = std::format(
+            "{:04d},{},algo={},range={},mvo={:.1f}/{:.1f},area={}/{},"
+            "ours,found={},cx={:.2f},cy={:.2f},W={:.4f},H={:.4f},min={:.3f},"
+            "ms,queryFrame={:.1f},detect={:.1f},render={:.1f},"
+            "ipl,ok={},w={},h={},origin={},fhash={}",
+            idx, func, algo, range, g_mvoX, g_mvoY, g_areaMin, g_areaMax,
+            mr.found ? 1 : 0, mr.cx, mr.cy, g_ourW, g_ourH, g_ourMin,
+            g_qfMs, g_detMs, g_renderMs,
+            mr.headerOk ? 1 : 0, mr.imgW, mr.imgH, mr.imgOrigin, mr.frameHash);
+        if (shadow != nullptr) {
+            line += std::format(",csym,found={},cx={:.2f},cy={:.2f},score={:.3f}",
+                                shadow->found ? 1 : 0, shadow->cx, shadow->cy, shadow->quality);
+        }
+        cap::log_line(line);
+    } catch (...) {  // NOLINT(bugprone-empty-catch) -- best-effort logging; never fatal
     }
-    cap::log_line(line);
 }
 
 // Reference point (where the mark sits when aligned), in unflipped frame coords:
@@ -255,34 +264,38 @@ void maybe_log_comp(const void* frame, const vis::CompResult& cr) {
     if (idx < 0) {
         return;
     }
-    if (cap::frames_enabled()) {
-        vis::save_frame(frame, std::format("{}\\comp_{:04d}.png", cap::dir(), idx).c_str());
-    }
-    // The original's result (it ran in shadow mode, or for its preview side effect).
-    double ox = 0;
-    double oy = 0;
-    double ow = 0;
-    double oh = 0;
-    double oa = 0;
-    double omin = 1.0;
-    mv::orig::GetOffset(&ox, &oy, &ow, &oh, &oa);
-    mv::orig::GetMin_val(&omin);
+    // Diagnostic logging must NEVER throw across the C ABI (std::format can allocate).
+    try {
+        if (cap::frames_enabled()) {
+            vis::save_frame(frame, std::format("{}\\comp_{:04d}.png", cap::dir(), idx).c_str());
+        }
+        // The original's result (it ran in shadow mode, or for its preview side effect).
+        double ox = 0;
+        double oy = 0;
+        double ow = 0;
+        double oh = 0;
+        double oa = 0;
+        double omin = 1.0;
+        mv::orig::GetOffset(&ox, &oy, &ow, &oh, &oa);
+        mv::orig::GetMin_val(&omin);
 
-    const char* method = cr.method == vis::CompResult::Method::Symmetry      ? "symmetry"
-                         : cr.method == vis::CompResult::Method::MinAreaRect ? "minarearect"
-                                                                             : "none";
-    cap::log_line(std::format(
-        "{:04d},CheckComp,drive={},thr={},expW={:.3f},expH={:.3f},expA={:.3f},upo={:.1f}/{:.1f},"
-        "ours,found={},cx={:.2f},cy={:.2f},w={:.2f},h={:.2f},angle={:.2f},q={:.3f},method={},"
-        "orig,x={:.4f},y={:.4f},w={:.4f},h={:.4f},a={:.4f},min={:.3f},"
-        "ms,queryFrame={:.1f},detect={:.1f},"
-        "ipl,ok={},w={},h={},origin={},fhash={}",
-        idx, kCompDrive ? 1 : 0, g_compThreshold, g_compExpW, g_compExpH, g_compExpA,
-        g_upoX, g_upoY,
-        cr.found ? 1 : 0, cr.cx, cr.cy, cr.w, cr.h, cr.angle, cr.quality, method,
-        ox, oy, ow, oh, oa, omin,
-        g_qfMs, g_detMs,
-        cr.headerOk ? 1 : 0, cr.imgW, cr.imgH, cr.imgOrigin, cr.frameHash));
+        const char* method = cr.method == vis::CompResult::Method::Symmetry      ? "symmetry"
+                             : cr.method == vis::CompResult::Method::MinAreaRect ? "minarearect"
+                                                                                 : "none";
+        cap::log_line(std::format(
+            "{:04d},CheckComp,drive={},thr={},expW={:.3f},expH={:.3f},expA={:.3f},upo={:.1f}/{:.1f},"
+            "ours,found={},cx={:.2f},cy={:.2f},w={:.2f},h={:.2f},angle={:.2f},q={:.3f},method={},"
+            "orig,x={:.4f},y={:.4f},w={:.4f},h={:.4f},a={:.4f},min={:.3f},"
+            "ms,queryFrame={:.1f},detect={:.1f},"
+            "ipl,ok={},w={},h={},origin={},fhash={}",
+            idx, kCompDrive ? 1 : 0, g_compThreshold, g_compExpW, g_compExpH, g_compExpA,
+            g_upoX, g_upoY,
+            cr.found ? 1 : 0, cr.cx, cr.cy, cr.w, cr.h, cr.angle, cr.quality, method,
+            ox, oy, ow, oh, oa, omin,
+            g_qfMs, g_detMs,
+            cr.headerOk ? 1 : 0, cr.imgW, cr.imgH, cr.imgOrigin, cr.frameHash));
+    } catch (...) {  // NOLINT(bugprone-empty-catch) -- best-effort logging; never fatal
+    }
 }
 
 // Shared scaffolding for the down-vision mark checks we own (CheckMark2,
@@ -297,6 +310,39 @@ void maybe_log_comp(const void* frame, const vis::CompResult& cr) {
 // `detect` (only while capture is armed, to avoid adding latency in production). Its
 // result is logged for offline comparison but NEVER drives placement. Used to vet a
 // candidate detector (circular-symmetry) on live frames before it takes over.
+// AVX2 build guard: the detector code is compiled with AVX2 (-mavx2 / /arch:AVX2),
+// so on a CPU lacking AVX2 the first such instruction faults with a cryptic
+// illegal-instruction crash. On first use, verify the CPU actually has AVX2 and
+// otherwise pop a modal warning pointing at the SSE2 baseline build. The check uses
+// no AVX2 and runs before any detector code. Compiles to a no-op in the no-AVX2 build.
+#ifdef __AVX2__
+bool cpu_has_avx2() {
+#if defined(__GNUC__) || defined(__clang__)
+    __builtin_cpu_init();
+    return __builtin_cpu_supports("avx2") != 0;
+#else
+    std::array<int, 4> regs{};
+    __cpuidex(regs.data(), 7, 0);
+    return (regs[1] & (1 << 5)) != 0;  // CPUID.(EAX=7,ECX=0):EBX bit 5 = AVX2
+#endif
+}
+#endif
+
+void guard_cpu_once() {
+#ifdef __AVX2__
+    static std::once_flag avx2Once;
+    std::call_once(avx2Once, [] {
+        if (!cpu_has_avx2()) {
+            MessageBoxA(nullptr,
+                        "This is the AVX2 build of MVision.dll, but this CPU does not "
+                        "support AVX2.\r\n\r\nUse the MVision-noavx2.dll build instead "
+                        "(rename it to MVision.dll).",
+                        "MVision: unsupported CPU", MB_OK | MB_ICONERROR | MB_TOPMOST);
+        }
+    });
+#endif
+}
+
 std::once_flag g_uiOnce;
 
 template <class Detect, class OrigRender>
@@ -357,6 +403,7 @@ int run_mark_check(const void* f, int hwnd, const char* name, int logAlgo, int l
 extern "C" {
 
 int __stdcall Initialize(int w, int h) {
+    guard_cpu_once();  // warn (once) if this AVX2 build is running on a non-AVX2 CPU
     return mv::orig::Initialize(w, h);
 }
 void __stdcall Release(void) {
@@ -366,6 +413,7 @@ HANDLE __stdcall GetCameraHandle(int idx) {
     return mv::orig::GetCameraHandle(idx);
 }
 void* __stdcall QueryFrame(void* cam, int timeout) {
+    guard_cpu_once();  // in case QueryFrame is reached before Initialize
     // Start the settings UI thread on the first frame (never in DllMain -> no loader
     // lock), so the Ctrl+Alt+M hotkey is live as soon as the camera streams.
     // Idempotent; the dialog stays hidden until the operator opens it.

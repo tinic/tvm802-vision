@@ -213,7 +213,17 @@ void fetch() {
 }
 
 void ensure() {
-    std::call_once(g_once, [] { std::thread(fetch).detach(); });
+    // Detached worker: an uncaught exception (std::bad_alloc from the endpoint-table
+    // vector, std::format in the diagnostic) would call std::terminate -> crash the
+    // host. Contain everything on this thread.
+    std::call_once(g_once, [] {
+        std::thread([] {
+            try {
+                fetch();
+            } catch (...) {  // NOLINT(bugprone-empty-catch) -- detached worker must not std::terminate
+            }
+        }).detach();
+    });
 }
 
 }  // namespace

@@ -49,11 +49,16 @@ const char* dir() {
 }
 
 void log_line(std::string_view line) {
-    CreateDirectoryA(kDir, nullptr);
-    // Binary append so the line ending stays LF-only (matches the original
-    // fopen("ab") writer; text mode would translate '\n' -> "\r\n" on Windows).
-    if (std::ofstream f{std::format("{}\\compare.log", kDir), std::ios::app | std::ios::binary}) {
-        f << line << '\n';
+    // Diagnostic sink: must never throw across the C ABI (std::format / ofstream can
+    // allocate / fail). Swallow -- a lost log line is harmless.
+    try {
+        CreateDirectoryA(kDir, nullptr);
+        // Binary append so the line ending stays LF-only (matches the original
+        // fopen("ab") writer; text mode would translate '\n' -> "\r\n" on Windows).
+        if (std::ofstream f{std::format("{}\\compare.log", kDir), std::ios::app | std::ios::binary}) {
+            f << line << '\n';
+        }
+    } catch (...) {  // NOLINT(bugprone-empty-catch) -- best-effort sink; must not cross the C ABI
     }
 }
 
