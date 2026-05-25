@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
-# Local mirror of the CI `lint` gate (.github/workflows/build.yml).
+# Local mirror of the CI `lint` gate (.github/workflows/build.yml), plus one
+# local-only extra (the mingw clang-tidy pass below).
 #
 # Run from anywhere: tools/check.sh
-# Gates, in order: clang-format, cppcheck, clang-tidy (portable detector core),
-# host-arch build + ctest. Each runs even if an earlier one fails; the script
-# exits non-zero if ANY gate failed.
+# Gates, in order: clang-format, cppcheck, clang-tidy (portable Windows-free TUs),
+# clang-tidy modernization of the OpenCV-free Windows TUs via mingw (skipped if
+# the toolchain is absent), host-arch build + ctest. Each runs even if an earlier
+# one fails; the script exits non-zero if ANY gate failed.
 #
 # The MSVC /W4 /WX warnings-as-errors build of the Windows-GDI translation units
 # (preview/passthrough/capture/dllmain, which need <windows.h>) is the CI `build`
 # job's responsibility — it can't run on a Linux dev box.
 #
 # Requires: clang-format, cppcheck, clang-tidy, cmake, a C++ compiler, OpenCV
-# (core/imgproc/imgcodecs) dev headers.
+# (core/imgproc/imgcodecs) dev headers. Optional: an i686-w64-mingw32 toolchain
+# (for the Windows-TU modernization gate).
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -36,11 +39,26 @@ gate "configure (host tests + compile DB for clang-tidy)"
 cmake -S . -B build-lint -DBUILD_TESTS=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON >/dev/null
 result $?
 
-gate "clang-tidy (portable detector core: src/detect_*.cpp)"
+gate "clang-tidy (portable, Windows-free TUs: src/detect_*.cpp + settings.cpp)"
 clang-tidy -p build-lint src/detect_common.cpp src/detect_circle.cpp \
     src/detect_contour.cpp src/detect_template.cpp src/detect_symmetry.cpp \
-    src/detect_component.cpp
+    src/detect_component.cpp src/settings.cpp
 result $?
+
+# Local-only: the OpenCV-free Windows TUs (capture/controller/settings_ui) hold
+# the bulk of the std::format / std::array work but need <windows.h>, so the
+# stock Linux clang-tidy can't see them. If an i686 mingw toolchain is present,
+# tidy just the modernization gate against the mingw target (no compile DB / no
+# OpenCV needed). Skipped (not failed) when the toolchain is absent.
+gate "clang-tidy modernization (Windows TUs via mingw)"
+if command -v i686-w64-mingw32-g++ >/dev/null 2>&1; then
+    clang-tidy --checks='-*,modernize-avoid-c-arrays,cppcoreguidelines-pro-type-vararg' \
+        src/settings_ui.cpp src/capture.cpp src/controller.cpp -- \
+        --target=i686-w64-windows-gnu -std=c++23 -I src -DNOMINMAX -D_WIN32_WINNT=0x0601
+    result $?
+else
+    echo "  SKIP (no i686-w64-mingw32 toolchain)"
+fi
 
 gate "host build + ctest"
 cmake --build build-lint >/dev/null && ctest --test-dir build-lint --output-on-failure

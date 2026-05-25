@@ -15,18 +15,20 @@
 #include <ws2tcpip.h>
 #include <iphlpapi.h>
 
+#include <array>
 #include <chrono>
 #include <cstdint>
-#include <cstdio>
+#include <format>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
 namespace vis {
 namespace {
 
-constexpr char kCtrlIp[] = "192.168.0.8";  // default controller IP (fallback)
-constexpr unsigned short kCtrlPort = 701;  // controller port
+constexpr const char* kCtrlIp = "192.168.0.8";  // default controller IP (fallback)
+constexpr unsigned short kCtrlPort = 701;       // controller port
 constexpr std::uint32_t kKeyUpX = 20, kKeyUpY = 21, kKeyDownX = 34, kKeyDownY = 35;
 
 std::mutex g_mtx;
@@ -97,35 +99,38 @@ SOCKET connect_timeout(const sockaddr_in& addr, int ms) {
 // Discard any bytes already waiting before a request.
 void drain(SOCKET s) {
     u_long avail = 0;
-    char buf[256];
+    std::array<char, 256> buf;
     for (int i = 0; i < 8; ++i) {
         if (ioctlsocket(s, FIONREAD, &avail) != 0 || avail == 0) return;
-        if (recv(s, buf, static_cast<int>(sizeof buf), 0) <= 0) return;
+        if (recv(s, buf.data(), static_cast<int>(buf.size()), 0) <= 0) return;
     }
 }
 
 // A short greeting arrives a few ms after connect; block one recv to wait for and
 // discard it before sending requests, then sweep any remainder.
 void consume_banner(SOCKET s) {
-    char buf[256];
-    (void)recv(s, buf, static_cast<int>(sizeof buf), 0);  // blocks up to SO_RCVTIMEO
+    std::array<char, 256> buf;
+    (void)recv(s, buf.data(), static_cast<int>(buf.size()), 0);  // blocks up to SO_RCVTIMEO
     drain(s);
 }
 
 // Read one param: [1,0,0,0, key(LE32), 0,0,0,0] -> value at response bytes[8..11].
 bool read_param(SOCKET s, std::uint32_t key, std::int32_t& out) {
     drain(s);
-    unsigned char req[12] = {1, 0, 0, 0,
-                             static_cast<unsigned char>(key),
-                             static_cast<unsigned char>(key >> 8),
-                             static_cast<unsigned char>(key >> 16),
-                             static_cast<unsigned char>(key >> 24),
-                             0, 0, 0, 0};
-    if (send(s, reinterpret_cast<const char*>(req), 12, 0) != 12) return false;
-    unsigned char resp[64];
+    const std::array<unsigned char, 12> req = {{1, 0, 0, 0,
+                                                static_cast<unsigned char>(key),
+                                                static_cast<unsigned char>(key >> 8),
+                                                static_cast<unsigned char>(key >> 16),
+                                                static_cast<unsigned char>(key >> 24),
+                                                0, 0, 0, 0}};
+    if (send(s, reinterpret_cast<const char*>(req.data()), static_cast<int>(req.size()), 0) !=
+        static_cast<int>(req.size()))
+        return false;
+    std::array<unsigned char, 64> resp;
     int got = 0;
     while (got < 12) {
-        int n = recv(s, reinterpret_cast<char*>(resp) + got, static_cast<int>(sizeof resp) - got, 0);
+        int n = recv(s, reinterpret_cast<char*>(resp.data()) + got,
+                     static_cast<int>(resp.size()) - got, 0);
         if (n <= 0) return false;
         got += n;
     }
@@ -158,14 +163,12 @@ void fetch() {
             closesocket(s);
         }
         if (cap::armed()) {  // diagnostic: confirm discovery/endpoint/values when armed
-            char ips[INET_ADDRSTRLEN] = {};
-            inet_ntop(AF_INET, &ep.sin_addr, ips, sizeof ips);
-            char line[160];
-            std::snprintf(line, sizeof line,
-                          "controller: discovered=%d ep=%s:%d connect=%d read=%d down=(%d,%d) up=(%d,%d)",
-                          discovered ? 1 : 0, ips, ntohs(ep.sin_port), connected ? 1 : 0, ok ? 1 : 0,
-                          dx, dy, ux, uy);
-            cap::log_line(line);
+            std::array<char, INET_ADDRSTRLEN> ips{};
+            inet_ntop(AF_INET, &ep.sin_addr, ips.data(), ips.size());
+            cap::log_line(std::format(
+                "controller: discovered={} ep={}:{} connect={} read={} down=({},{}) up=({},{})",
+                discovered ? 1 : 0, ips.data(), ntohs(ep.sin_port), connected ? 1 : 0, ok ? 1 : 0,
+                dx, dy, ux, uy));
         }
         if (ok) {
             std::lock_guard<std::mutex> lk(g_mtx);

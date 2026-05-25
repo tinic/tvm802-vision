@@ -19,12 +19,14 @@
 #include "settings.h"
 #include "settings_ui.h"
 
-#include <cstdio>
+#include <array>
 #include <cstring>
 #include <chrono>
+#include <format>
 #include <functional>
 #include <limits>
 #include <mutex>
+#include <string>
 #include <thread>
 
 // Lightweight timing to locate the frame-rate bottleneck (QueryFrame vs our
@@ -46,7 +48,7 @@ unsigned int g_lastFrameHash = 0;  // freshness guard: hash of the last frame se
 // host re-pushing the same template. The plane is a size x size 8-bit gray image,
 // widthStep aligned to 4.
 struct Template {
-    unsigned char buf[16384];
+    std::array<unsigned char, 16384> buf;
     int sz = 0;  // 0 = nothing cached yet
     unsigned int hash = 0;
     double scale = 0.0;  // locked match scale (0 = re-sweep next detect)
@@ -62,10 +64,10 @@ unsigned int tmpl_hash(const unsigned char* p, size_t n) {
 void cache_template(const unsigned char* t, int sz) {
     const int step = (sz + 3) & ~3;
     const size_t n = static_cast<size_t>(step) * sz;
-    if (!t || sz < 4 || n > sizeof g_tmpl.buf) return;
+    if (!t || sz < 4 || n > g_tmpl.buf.size()) return;
     const unsigned int h = tmpl_hash(t, n);
     if (h == g_tmpl.hash && sz == g_tmpl.sz) return;  // unchanged -> keep scale lock
-    std::memcpy(g_tmpl.buf, t, n);
+    std::memcpy(g_tmpl.buf.data(), t, n);
     g_tmpl.sz = sz;
     g_tmpl.hash = h;
     g_tmpl.scale = 0.0;  // new template -> re-sweep scale next detect
@@ -188,26 +190,21 @@ void maybe_log(const void* frame, const char* func, int algo, int range,
     if (idx < 0) return;
     // PNG save is opt-in (separate 'frames' trigger): imwrite is the heavy part
     // and adds latency to the detection path, so log-only runs stay responsive.
-    if (cap::frames_enabled()) {
-        char png[MAX_PATH];
-        std::snprintf(png, sizeof png, "%s\\frame_%04d.png", cap::dir(), idx);
-        vis::save_frame(frame, png);
-    }
+    if (cap::frames_enabled())
+        vis::save_frame(frame, std::format("{}\\frame_{:04d}.png", cap::dir(), idx).c_str());
 
-    char line[768];
-    int n = std::snprintf(line, sizeof line,
-                          "%04d,%s,algo=%d,range=%d,mvo=%.1f/%.1f,area=%d/%d,"
-                          "ours,found=%d,cx=%.2f,cy=%.2f,W=%.4f,H=%.4f,min=%.3f,"
-                          "ms,queryFrame=%.1f,detect=%.1f,render=%.1f,"
-                          "ipl,ok=%d,w=%d,h=%d,origin=%d,fhash=%u",
-                          idx, func, algo, range, g_mvoX, g_mvoY, g_areaMin, g_areaMax,
-                          mr.found ? 1 : 0, mr.cx, mr.cy, g_ourW, g_ourH, g_ourMin,
-                          g_qfMs, g_detMs, g_renderMs,
-                          mr.headerOk ? 1 : 0, mr.imgW, mr.imgH, mr.imgOrigin, mr.frameHash);
-    if (shadow && n > 0 && n < static_cast<int>(sizeof line))
-        std::snprintf(line + n, sizeof line - static_cast<size_t>(n),
-                      ",csym,found=%d,cx=%.2f,cy=%.2f,score=%.3f",
-                      shadow->found ? 1 : 0, shadow->cx, shadow->cy, shadow->quality);
+    std::string line = std::format(
+        "{:04d},{},algo={},range={},mvo={:.1f}/{:.1f},area={}/{},"
+        "ours,found={},cx={:.2f},cy={:.2f},W={:.4f},H={:.4f},min={:.3f},"
+        "ms,queryFrame={:.1f},detect={:.1f},render={:.1f},"
+        "ipl,ok={},w={},h={},origin={},fhash={}",
+        idx, func, algo, range, g_mvoX, g_mvoY, g_areaMin, g_areaMax,
+        mr.found ? 1 : 0, mr.cx, mr.cy, g_ourW, g_ourH, g_ourMin,
+        g_qfMs, g_detMs, g_renderMs,
+        mr.headerOk ? 1 : 0, mr.imgW, mr.imgH, mr.imgOrigin, mr.frameHash);
+    if (shadow)
+        line += std::format(",csym,found={},cx={:.2f},cy={:.2f},score={:.3f}",
+                            shadow->found ? 1 : 0, shadow->cx, shadow->cy, shadow->quality);
     cap::log_line(line);
 }
 
@@ -239,11 +236,8 @@ void maybe_log_comp(const void* frame, const vis::CompResult& cr) {
     if (!cap::comp_enabled()) return;
     int idx = cap::next_index();
     if (idx < 0) return;
-    if (cap::frames_enabled()) {
-        char png[MAX_PATH];
-        std::snprintf(png, sizeof png, "%s\\comp_%04d.png", cap::dir(), idx);
-        vis::save_frame(frame, png);
-    }
+    if (cap::frames_enabled())
+        vis::save_frame(frame, std::format("{}\\comp_{:04d}.png", cap::dir(), idx).c_str());
     // The original's result (it ran in shadow mode, or for its preview side effect).
     double ox = 0, oy = 0, ow = 0, oh = 0, oa = 0, omin = 1.0;
     mv::orig::GetOffset(&ox, &oy, &ow, &oh, &oa);
@@ -252,20 +246,18 @@ void maybe_log_comp(const void* frame, const vis::CompResult& cr) {
     const char* method = cr.method == vis::CompResult::Method::Symmetry      ? "symmetry"
                          : cr.method == vis::CompResult::Method::MinAreaRect ? "minarearect"
                                                                              : "none";
-    char line[768];
-    std::snprintf(line, sizeof line,
-                  "%04d,CheckComp,drive=%d,thr=%d,expW=%.3f,expH=%.3f,expA=%.3f,upo=%.1f/%.1f,"
-                  "ours,found=%d,cx=%.2f,cy=%.2f,w=%.2f,h=%.2f,angle=%.2f,q=%.3f,method=%s,"
-                  "orig,x=%.4f,y=%.4f,w=%.4f,h=%.4f,a=%.4f,min=%.3f,"
-                  "ms,queryFrame=%.1f,detect=%.1f,"
-                  "ipl,ok=%d,w=%d,h=%d,origin=%d,fhash=%u",
-                  idx, kCompDrive ? 1 : 0, g_compThreshold, g_compExpW, g_compExpH, g_compExpA,
-                  g_upoX, g_upoY,
-                  cr.found ? 1 : 0, cr.cx, cr.cy, cr.w, cr.h, cr.angle, cr.quality, method,
-                  ox, oy, ow, oh, oa, omin,
-                  g_qfMs, g_detMs,
-                  cr.headerOk ? 1 : 0, cr.imgW, cr.imgH, cr.imgOrigin, cr.frameHash);
-    cap::log_line(line);
+    cap::log_line(std::format(
+        "{:04d},CheckComp,drive={},thr={},expW={:.3f},expH={:.3f},expA={:.3f},upo={:.1f}/{:.1f},"
+        "ours,found={},cx={:.2f},cy={:.2f},w={:.2f},h={:.2f},angle={:.2f},q={:.3f},method={},"
+        "orig,x={:.4f},y={:.4f},w={:.4f},h={:.4f},a={:.4f},min={:.3f},"
+        "ms,queryFrame={:.1f},detect={:.1f},"
+        "ipl,ok={},w={},h={},origin={},fhash={}",
+        idx, kCompDrive ? 1 : 0, g_compThreshold, g_compExpW, g_compExpH, g_compExpA,
+        g_upoX, g_upoY,
+        cr.found ? 1 : 0, cr.cx, cr.cy, cr.w, cr.h, cr.angle, cr.quality, method,
+        ox, oy, ow, oh, oa, omin,
+        g_qfMs, g_detMs,
+        cr.headerOk ? 1 : 0, cr.imgW, cr.imgH, cr.imgOrigin, cr.frameHash));
 }
 
 // Shared scaffolding for the down-vision mark checks we own (CheckMark2,
@@ -507,7 +499,7 @@ int __stdcall CheckTemplate(void* f, int hwnd, int w, int h, unsigned char* t, i
     return run_mark_check(f, hwnd, "CheckTemplate", sz, m, [&](double refX, double refY, int searchR) {
             vis::MarkResult mr;
             if (g_tmpl.sz > 0)
-                mr = vis::detect_template_mark(f, g_tmpl.buf, g_tmpl.sz, th, m,
+                mr = vis::detect_template_mark(f, g_tmpl.buf.data(), g_tmpl.sz, th, m,
                                                refX, refY, searchR, &g_tmpl.scale);
             return mr; }, [&] { mv::orig::CheckTemplate(f, hwnd, w, h, t, sz, th, m); });
 }

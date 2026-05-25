@@ -8,6 +8,8 @@
 // We must NOT use the original mySaveImage — it flips the live IplImage buffer
 // in place, which corrupts the frame the original CheckMark then processes.
 
+#include <string_view>
+
 namespace cap {
 
 // True if capture is armed (trigger file present and frame cap not reached).
@@ -34,6 +36,6 @@ int next_index();
 const char* dir();
 
 // Append a line to C:\mvision_capture\compare.log.
-void log_line(const char* line);
+void log_line(std::string_view line);
 
 }  // namespace cap

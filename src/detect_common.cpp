@@ -8,6 +8,7 @@
 #include <opencv2/imgcodecs.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <functional>
 #include <vector>
@@ -81,7 +82,7 @@ void apply_image_adjustments(cv::Mat& g, const Settings& s) {
         double hi = 1.0 - s.whitePoint / 255.0;
         if (hi <= lo) hi = lo + 0.004;
         const double bri = s.brightness / 255.0;
-        uchar lut[256];
+        std::array<uchar, 256> lut;
         for (int i = 0; i < 256; ++i) {
             double v = static_cast<double>(i) / 255.0;
             if (doGamma) v = std::pow(v < 0.0 ? 0.0 : v, s.gamma);
@@ -91,7 +92,7 @@ void apply_image_adjustments(cv::Mat& g, const Settings& s) {
             v = v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v);  // clamped -> lround fits 0..255
             lut[static_cast<size_t>(i)] = static_cast<uchar>(std::lround(v * 255.0));
         }
-        const cv::Mat lutMat(1, 256, CV_8U, lut);
+        const cv::Mat lutMat(1, 256, CV_8U, lut.data());
         cv::LUT(g, lutMat, g);
     }
 

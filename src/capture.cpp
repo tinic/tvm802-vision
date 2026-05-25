@@ -2,7 +2,10 @@
 
 #include <windows.h>
 #include <atomic>
-#include <cstdio>
+#include <format>
+#include <fstream>
+#include <string>
+#include <string_view>
 
 namespace {
 constexpr const char* kDir = "C:\\mvision_capture";
@@ -45,15 +48,12 @@ const char* dir() {
     return kDir;
 }
 
-void log_line(const char* line) {
-    if (!line) return;
+void log_line(std::string_view line) {
     CreateDirectoryA(kDir, nullptr);
-    char path[MAX_PATH];
-    std::snprintf(path, sizeof path, "%s\\compare.log", kDir);
-    if (FILE* f = std::fopen(path, "ab")) {
-        std::fprintf(f, "%s\n", line);
-        std::fclose(f);
-    }
+    // Binary append so the line ending stays LF-only (matches the original
+    // fopen("ab") writer; text mode would translate '\n' -> "\r\n" on Windows).
+    if (std::ofstream f{std::format("{}\\compare.log", kDir), std::ios::app | std::ios::binary})
+        f << line << '\n';
 }
 
 }  // namespace cap

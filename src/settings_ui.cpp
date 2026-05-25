@@ -18,10 +18,13 @@
 #include <windows.h>
 #include <commctrl.h>
 
+#include <array>
 #include <cmath>
-#include <cstdio>
+#include <format>
+#include <fstream>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 
 #ifndef MVISION_VERSION  // injected by CMake from `git describe`; fallback for ad-hoc builds
@@ -78,7 +81,7 @@ struct SliderDef {
 
 // Layout (client 420 x 482). Group headers + the median checkbox are separate
 // statics/buttons. Entries are in Idx order; the y values place them in two groups.
-const SliderDef kDefs[S_COUNT] = {
+const std::array<SliderDef, S_COUNT> kDefs = {{
     {"Diameter min", 0, 120, K_PX, 46},        // S_RMIN (slider is RADIUS px; shown as diameter)
     {"Diameter max", 0, 120, K_PX, 71},        // S_RMAX (slider is RADIUS px; shown as diameter)
     {"Sensitivity", 0, 200, K_SENS, 96},       // S_SYM   (accept threshold, quadratic map)
@@ -91,14 +94,14 @@ const SliderDef kDefs[S_COUNT] = {
     {"Exposure min", 0, 128, K_AUTOINT, 121},  // S_EXPLO (frame-mean gate low)
     {"Exposure max", 0, 255, K_AUTOINT, 146},  // S_EXPHI (frame-mean gate high)
     {"Blur", 0, 25, K_BLUR, 364},              // S_BLUR  (pre-blur kernel px)
-};
+}};
 
 HINSTANCE g_inst = nullptr;
 HWND g_win = nullptr;
 HWND g_lblMode = nullptr, g_lblStatus = nullptr;
-HWND g_tb[S_COUNT] = {};
-HWND g_lblName[S_COUNT] = {};
-HWND g_lblVal[S_COUNT] = {};
+std::array<HWND, S_COUNT> g_tb{};
+std::array<HWND, S_COUNT> g_lblName{};
+std::array<HWND, S_COUNT> g_lblVal{};
 HWND g_chkMedian = nullptr;
 HBRUSH g_brGreen = nullptr, g_brRed = nullptr;
 bool g_lastFound = false;
@@ -127,26 +130,27 @@ BOOL CALLBACK set_font_cb(HWND child, LPARAM f) {  // __stdcall (CALLBACK) for x
 // context; we activate it around control creation. Returns INVALID_HANDLE_VALUE on
 // failure (controls then fall back to the classic look -- no crash).
 HANDLE make_v6_context() {
-    char dir[MAX_PATH] = {};
-    if (GetTempPathA(MAX_PATH, dir) == 0) return INVALID_HANDLE_VALUE;
-    char path[MAX_PATH] = {};
-    if (GetTempFileNameA(dir, "mvm", 0, path) == 0) return INVALID_HANDLE_VALUE;
-    FILE* f = std::fopen(path, "wb");
-    if (!f) return INVALID_HANDLE_VALUE;
-    static const char kManifest[] =
+    std::array<char, MAX_PATH> dir{};
+    if (GetTempPathA(MAX_PATH, dir.data()) == 0) return INVALID_HANDLE_VALUE;
+    std::array<char, MAX_PATH> path{};
+    if (GetTempFileNameA(dir.data(), "mvm", 0, path.data()) == 0) return INVALID_HANDLE_VALUE;
+    static constexpr std::string_view kManifest =
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\r\n"
         "<assembly xmlns=\"urn:schemas-microsoft-com:asm.v1\" manifestVersion=\"1.0\">\r\n"
         "<dependency><dependentAssembly><assemblyIdentity type=\"win32\" "
         "name=\"Microsoft.Windows.Common-Controls\" version=\"6.0.0.0\" "
         "processorArchitecture=\"*\" publicKeyToken=\"6595b64144ccf1df\" language=\"*\"/>"
         "</dependentAssembly></dependency></assembly>\r\n";
-    std::fwrite(kManifest, 1, sizeof(kManifest) - 1, f);
-    std::fclose(f);
+    {
+        std::ofstream f{path.data(), std::ios::binary};
+        if (!f) return INVALID_HANDLE_VALUE;
+        f.write(kManifest.data(), static_cast<std::streamsize>(kManifest.size()));
+    }
     ACTCTXA actx{};
     actx.cbSize = sizeof actx;
-    actx.lpSource = path;
+    actx.lpSource = path.data();
     HANDLE h = CreateActCtxA(&actx);
-    DeleteFileA(path);  // CreateActCtx has parsed it; the context lives independently
+    DeleteFileA(path.data());  // CreateActCtx has parsed it; the context lives independently
     return h;
 }
 
@@ -190,48 +194,38 @@ double down_scale_mean() {
     return sc.valid ? (sc.xMmPerPx + sc.yMmPerPx) * 0.5 : 0.0;
 }
 
-void format_value(Kind kind, int pos, char* buf, size_t n) {
+std::string format_value(Kind kind, int pos) {
     const double t = static_cast<double>(pos) / 10.0;
     switch (kind) {
         case K_PX:  // radius slider, shown as DIAMETER (2x) to match the fiducial/host convention
-            if (pos <= 0) {
-                std::snprintf(buf, n, "Auto");
-            } else if (const double mm = down_scale_mean(); mm > 0.0) {
-                std::snprintf(buf, n, "%d px (%.2f mm)", pos * 2, pos * 2 * mm);
-            } else {
-                std::snprintf(buf, n, "%d px", pos * 2);
-            }
-            break;
-        case K_THR: pos <= 0 ? std::snprintf(buf, n, "Auto") : std::snprintf(buf, n, "%.1f", t); break;
-        case K_SENS: pos <= 0 ? std::snprintf(buf, n, "Auto") : std::snprintf(buf, n, "%.2f", sens_pos_to_val(pos)); break;
-        case K_GAMMA: pos <= 0 ? std::snprintf(buf, n, "off") : std::snprintf(buf, n, "%.1f", t); break;
-        case K_SINT: pos == 0 ? std::snprintf(buf, n, "0") : std::snprintf(buf, n, "%+d", pos); break;
-        case K_INT: pos <= 0 ? std::snprintf(buf, n, "0") : std::snprintf(buf, n, "%d", pos); break;
-        case K_STENTHS: pos == 0 ? std::snprintf(buf, n, "0") : std::snprintf(buf, n, "%+.1f", t); break;
-        case K_AUTOINT: pos <= 0 ? std::snprintf(buf, n, "Auto") : std::snprintf(buf, n, "%d", pos); break;
+            if (pos <= 0) return "Auto";
+            if (const double mm = down_scale_mean(); mm > 0.0)
+                return std::format("{} px ({:.2f} mm)", pos * 2, pos * 2 * mm);
+            return std::format("{} px", pos * 2);
+        case K_THR: return pos <= 0 ? "Auto" : std::format("{:.1f}", t);
+        case K_SENS: return pos <= 0 ? "Auto" : std::format("{:.2f}", sens_pos_to_val(pos));
+        case K_GAMMA: return pos <= 0 ? "off" : std::format("{:.1f}", t);
+        case K_SINT: return pos == 0 ? "0" : std::format("{:+d}", pos);
+        case K_INT: return pos <= 0 ? "0" : std::format("{}", pos);
+        case K_STENTHS: return pos == 0 ? "0" : std::format("{:+.1f}", t);
+        case K_AUTOINT: return pos <= 0 ? "Auto" : std::format("{}", pos);
         case K_BLUR: {
-            if (pos <= 0) {
-                std::snprintf(buf, n, "Auto");
-            } else {
-                int k = pos < 3 ? 3 : (pos > 25 ? 25 : pos);
-                if ((k & 1) == 0) ++k;  // shown as the odd kernel the detector will use
-                std::snprintf(buf, n, "%d px", k);
-            }
-            break;
+            if (pos <= 0) return "Auto";
+            int k = pos < 3 ? 3 : (pos > 25 ? 25 : pos);
+            if ((k & 1) == 0) ++k;  // shown as the odd kernel the detector will use
+            return std::format("{} px", k);
         }
     }
+    return {};  // unreachable (all Kind values handled); satisfies non-void return analysis
 }
 
-int tb_pos(int i) {
+int tb_pos(std::size_t i) {
     return static_cast<int>(SendMessageA(g_tb[i], TBM_GETPOS, 0, 0));
 }
 
 void refresh_value_labels() {
-    for (int i = 0; i < S_COUNT; ++i) {
-        char buf[32];
-        format_value(kDefs[i].kind, tb_pos(i), buf, sizeof buf);
-        SetWindowTextA(g_lblVal[i], buf);
-    }
+    for (std::size_t i = 0; i < kDefs.size(); ++i)
+        SetWindowTextA(g_lblVal[i], format_value(kDefs[i].kind, tb_pos(i)).c_str());
 }
 
 // pos>0 (or !=0 for signed) overrides; 0 = Auto/off (detector default).
@@ -273,7 +267,7 @@ void apply_from_controls() {
 }
 
 // Which controls actually affect a given mode (the rest are greyed out).
-bool slider_applies(int mode, int idx) {
+bool slider_applies(int mode, std::size_t idx) {
     switch (idx) {
         case S_SYM: return mode == MODE_ROUND;  // symmetry accept threshold: Round only
         case S_RMIN:
@@ -285,7 +279,7 @@ bool slider_applies(int mode, int idx) {
 // Enable/disable each control (and its name + value labels) for the active mode, so
 // settings that have no effect read as greyed out.
 void update_enabled(int mode) {
-    for (int i = 0; i < S_COUNT; ++i) {
+    for (std::size_t i = 0; i < kDefs.size(); ++i) {
         const BOOL en = slider_applies(mode, i) ? TRUE : FALSE;
         EnableWindow(g_tb[i], en);
         EnableWindow(g_lblName[i], en);
@@ -296,7 +290,7 @@ void update_enabled(int mode) {
 
 void controls_from_settings() {
     const Settings s = get_settings(g_curMode);
-    int pos[S_COUNT];
+    std::array<int, S_COUNT> pos;
     pos[S_RMIN] = static_cast<int>(s.radiusMinPx);
     pos[S_RMAX] = static_cast<int>(s.radiusMaxPx);
     pos[S_SYM] = sens_val_to_pos(s.minSymmetry);
@@ -309,7 +303,7 @@ void controls_from_settings() {
     pos[S_EXPLO] = static_cast<int>(std::lround(s.meanLo));
     pos[S_EXPHI] = static_cast<int>(std::lround(s.meanHi));
     pos[S_BLUR] = static_cast<int>(std::lround(s.blur));
-    for (int i = 0; i < S_COUNT; ++i)
+    for (std::size_t i = 0; i < pos.size(); ++i)
         SendMessageA(g_tb[i], TBM_SETPOS, TRUE, static_cast<LPARAM>(pos[i]));
     SendMessageA(g_chkMedian, BM_SETCHECK, s.medianRings > 0.5 ? BST_CHECKED : BST_UNCHECKED, 0);
     update_enabled(g_curMode);
@@ -328,29 +322,27 @@ void refresh_status() {
                        : st.mode == 2 ? "Circular (CheckMark2)"
                        : st.mode == 3 ? "Template (CheckTemplate)"
                                       : "(none yet)";
-    char m[96];
-    std::snprintf(m, sizeof m, "Active mode:  %s", mode);
-    SetWindowTextA(g_lblMode, m);
+    SetWindowTextA(g_lblMode, std::format("Active mode:  {}", mode).c_str());
 
-    char buf[200];
+    std::string status;
     if (st.found) {
         const CamScale sc = down_cam_scale();
-        char r[40], o[64];
         const double dpx = st.radiusPx * 2.0;  // detected diameter (radius x2)
+        std::string r, o;
         if (sc.valid) {
             const double mean = (sc.xMmPerPx + sc.yMmPerPx) * 0.5;
-            std::snprintf(r, sizeof r, "dia %.1f px (%.2f mm)", dpx, dpx * mean);
-            std::snprintf(o, sizeof o, "off %.1f, %.1f px (%.2f, %.2f mm)", st.offXpx, st.offYpx,
-                          st.offXpx * sc.xMmPerPx, st.offYpx * sc.yMmPerPx);
+            r = std::format("dia {:.1f} px ({:.2f} mm)", dpx, dpx * mean);
+            o = std::format("off {:.1f}, {:.1f} px ({:.2f}, {:.2f} mm)", st.offXpx, st.offYpx,
+                            st.offXpx * sc.xMmPerPx, st.offYpx * sc.yMmPerPx);
         } else {
-            std::snprintf(r, sizeof r, "dia %.1f px", dpx);
-            std::snprintf(o, sizeof o, "off %.1f, %.1f px", st.offXpx, st.offYpx);
+            r = std::format("dia {:.1f} px", dpx);
+            o = std::format("off {:.1f}, {:.1f} px", st.offXpx, st.offYpx);
         }
-        std::snprintf(buf, sizeof buf, " LOCKED    score %.2f    %s    %s", st.score, r, o);
+        status = std::format(" LOCKED    score {:.2f}    {}    {}", st.score, r, o);
     } else {
-        std::snprintf(buf, sizeof buf, " NO LOCK    score %.2f", st.score);
+        status = std::format(" NO LOCK    score {:.2f}", st.score);
     }
-    SetWindowTextA(g_lblStatus, buf);
+    SetWindowTextA(g_lblStatus, status.c_str());
 
     g_lastFound = st.found;
     InvalidateRect(g_lblStatus, nullptr, TRUE);
@@ -368,7 +360,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             make_static(hwnd, "- Detection -", 12, 28, 200, 16);
             make_static(hwnd, "- Image adjustments -", 12, 196, 240, 16);
 
-            for (int i = 0; i < S_COUNT; ++i) {
+            for (std::size_t i = 0; i < kDefs.size(); ++i) {
                 g_lblName[i] = make_static(hwnd, kDefs[i].label, 12, kDefs[i].y + 2, 90, 18);  // wide enough for "Exposure min"
                 g_tb[i] = CreateWindowExA(0, "msctls_trackbar32", "",
                                           WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
@@ -507,9 +499,9 @@ void ui_thread() {
 void start_settings_ui() {
     static std::once_flag once;
     std::call_once(once, [] {
-        char cwd[MAX_PATH] = {};
-        const DWORD n = GetCurrentDirectoryA(MAX_PATH, cwd);
-        g_iniPath = (n > 0 && n < MAX_PATH) ? std::string(cwd) + "\\MVision.ini" : "MVision.ini";
+        std::array<char, MAX_PATH> cwd{};
+        const DWORD n = GetCurrentDirectoryA(MAX_PATH, cwd.data());
+        g_iniPath = (n > 0 && n < MAX_PATH) ? std::string(cwd.data()) + "\\MVision.ini" : "MVision.ini";
         load_settings(g_iniPath.c_str());  // apply persisted settings before the first detect
         std::thread(ui_thread).detach();
     });

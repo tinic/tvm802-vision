@@ -3,7 +3,10 @@ project(MVision LANGUAGES CXX)
 
 option(BUILD_TESTS "Build the offline OpenCV detector test harness (host arch)" OFF)
 
-set(CMAKE_CXX_STANDARD 20)
+# C++23 for std::format-based diagnostics/UI text (no snprintf / fixed char buffers)
+# and std::array throughout. The detector core + Win32 TUs only use <= C++20 library
+# features, so dropping back to 20 here stays buildable if a toolchain lacks C++23.
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 

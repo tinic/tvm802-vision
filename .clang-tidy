@@ -1,19 +1,24 @@
 # clang-tidy config for tvm802-vision.
 #
-# Enforced in CI (the `lint` job) and by tools/check.sh on the PORTABLE detector
-# core (src/vision.cpp). The Windows-GDI translation units
-# (preview/passthrough/capture/dllmain) include <windows.h>, which clang-tidy
-# can't parse on the Linux runner, so those are covered by the MSVC /W4 /WX
-# build instead (the `build` job / build-cmake.bat).
+# Enforced in CI (the `lint` job) and by tools/check.sh on the PORTABLE,
+# Windows-free translation units (src/detect_*.cpp, src/settings.cpp). The
+# Windows-GDI translation units (preview/passthrough/capture/controller/
+# settings_ui/dllmain) include <windows.h>, which clang-tidy can't parse on the
+# stock Linux runner: tools/check.sh tidies the OpenCV-free ones
+# (capture/controller/settings_ui) against the i686 mingw target when that
+# toolchain is present, and the MSVC /W4 /WX build covers the rest.
 #
 # The check set is kept tight and stable (static analyzer + bugprone +
-# performance) so it doesn't drift across clang-tidy versions; two noisy /
-# low-value checks are excluded.
+# performance, plus a modernization gate: no C-style arrays, no C vararg calls
+# such as snprintf/printf -- use std::array and std::format instead) so it
+# doesn't drift across clang-tidy versions; two noisy / low-value checks excluded.
 Checks: >
   -*,
   clang-analyzer-*,
   bugprone-*,
   performance-*,
+  modernize-avoid-c-arrays,
+  cppcoreguidelines-pro-type-vararg,
   -bugprone-easily-swappable-parameters,
   -bugprone-narrowing-conversions
 WarningsAsErrors: '*'

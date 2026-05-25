@@ -1,5 +1,6 @@
 #include "settings.h"
 
+#include <array>
 #include <cstdlib>
 #include <fstream>
 #include <mutex>
@@ -11,11 +12,11 @@
 namespace vis {
 namespace {
 std::mutex g_mu;
-Settings g_settings[MODE_COUNT];  // indexed by mode; [1..3] used
+std::array<Settings, MODE_COUNT> g_settings;  // indexed by mode; [1..3] used
 LiveStatus g_status;
 
-int clamp_mode(int m) {
-    return (m >= MODE_ROUND && m <= MODE_TEMPLATE) ? m : MODE_ROUND;
+std::size_t clamp_mode(int m) {
+    return static_cast<std::size_t>((m >= MODE_ROUND && m <= MODE_TEMPLATE) ? m : MODE_ROUND);
 }
 
 const char* mode_name(int m) {
@@ -101,7 +102,7 @@ void load_settings(const char* path) {
     if (!path) return;
     std::ifstream f(path);
     if (!f) return;
-    Settings parsed[MODE_COUNT];  // start from defaults; fill the sections present
+    std::array<Settings, MODE_COUNT> parsed;  // start from defaults; fill the sections present
     int cur = MODE_NONE;
     std::string line;
     while (std::getline(f, line)) {
@@ -113,22 +114,25 @@ void load_settings(const char* path) {
         if (cur == MODE_NONE) continue;  // keys before any [section] are ignored
         const std::string::size_type eq = line.find('=');
         if (eq == std::string::npos) continue;
-        assign_kv(parsed[cur], line.substr(0, eq), std::atof(line.c_str() + eq + 1));
+        assign_kv(parsed[static_cast<std::size_t>(cur)], line.substr(0, eq),
+                  std::atof(line.c_str() + eq + 1));
     }
     std::lock_guard<std::mutex> lk(g_mu);
-    for (int m = MODE_ROUND; m <= MODE_TEMPLATE; ++m) g_settings[m] = parsed[m];
+    for (int m = MODE_ROUND; m <= MODE_TEMPLATE; ++m)
+        g_settings[static_cast<std::size_t>(m)] = parsed[static_cast<std::size_t>(m)];
 }
 
 void save_settings(const char* path) {
     if (!path) return;
-    Settings snap[MODE_COUNT];
+    std::array<Settings, MODE_COUNT> snap;
     {
         std::lock_guard<std::mutex> lk(g_mu);
-        for (int m = MODE_ROUND; m <= MODE_TEMPLATE; ++m) snap[m] = g_settings[m];
+        for (int m = MODE_ROUND; m <= MODE_TEMPLATE; ++m)
+            snap[static_cast<std::size_t>(m)] = g_settings[static_cast<std::size_t>(m)];
     }
     std::ofstream f(path, std::ios::trunc);
     if (!f) return;
-    for (int m = MODE_ROUND; m <= MODE_TEMPLATE; ++m) write_section(f, m, snap[m]);
+    for (int m = MODE_ROUND; m <= MODE_TEMPLATE; ++m) write_section(f, m, snap[static_cast<std::size_t>(m)]);
 }
 
 }  // namespace vis

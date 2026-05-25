@@ -7,6 +7,7 @@
 #include <opencv2/imgproc.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <vector>
 
@@ -195,7 +196,7 @@ double CircularSymmetry::score(const cv::Mat& g, double cx, double cy, double& e
     int nAll = 0;
     double wRingVar = 0.0, wSum = 0.0, maxRingVar = -1.0;
     edgeR = 0.0;
-    float ringVars[256];  // per-ring variances, for the median combine
+    std::array<float, 256> ringVars;  // per-ring variances, for the median combine
     int nRingVar = 0;
     const double wlim = g.cols - 1.0, hlim = g.rows - 1.0;
     const uchar* data = g.ptr<uchar>(0);                        // row pointer/stride computed ONCE here,
@@ -223,7 +224,8 @@ double CircularSymmetry::score(const cv::Mat& g, double cx, double cy, double& e
         if (var < 0.0) var = 0.0;
         wRingVar += cnt * var;
         wSum += cnt;
-        if (median && nRingVar < 256) ringVars[nRingVar++] = static_cast<float>(var);
+        if (median && nRingVar < static_cast<int>(ringVars.size()))
+            ringVars[static_cast<size_t>(nRingVar++)] = static_cast<float>(var);
         if (var > maxRingVar) {
             maxRingVar = var;
             edgeR = ringR_[static_cast<size_t>(ri)];
@@ -240,8 +242,8 @@ double CircularSymmetry::score(const cv::Mat& g, double cx, double cy, double& e
     double avgRingVar = meanRingVar;
     if (median && nRingVar > 0) {
         const int mid = nRingVar / 2;
-        std::nth_element(ringVars, ringVars + mid, ringVars + nRingVar);
-        const double med = static_cast<double>(ringVars[mid]);
+        std::nth_element(ringVars.begin(), ringVars.begin() + mid, ringVars.begin() + nRingVar);
+        const double med = static_cast<double>(ringVars[static_cast<size_t>(mid)]);
         // The median rescues a genuine fiducial whose mean within-ring variance is
         // inflated by a few glare rings. But it must NOT collapse toward zero over a
         // flat black area that borders a bright edge: there most rings are flat (var
