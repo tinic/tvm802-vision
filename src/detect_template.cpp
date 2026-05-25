@@ -88,7 +88,7 @@ static MarkResult detect_template_one_field(const cv::Mat& g, const cv::Mat& tb,
         const double b = (locked && pass == 0) ? *ioScale : kTmpl.scaleSweepHi;
         const int nScl = static_cast<int>(std::lround((b - a) / kTmpl.scaleStep)) + 1;
         for (int si = 0; si < nScl; ++si) {
-            const double scl = std::fma(si, kTmpl.scaleStep, a);
+            const double scl = a + si * kTmpl.scaleStep;
             cv::Mat ts;
             if (std::fabs(scl - 1.0) < 1e-6) {
                 ts = tb;
@@ -133,7 +133,7 @@ static MarkResult detect_template_one_field(const cv::Mat& g, const cv::Mat& tb,
     const int s = (strength >= kTmpl.strengthLo && strength <= kTmpl.strengthHi)
                       ? strength
                       : kTmpl.strengthDefault;
-    if (bestResult.empty() || bestVal > std::fma(-kTmpl.acceptPerStrength, s, kTmpl.acceptBase)) {
+    if (bestResult.empty() || bestVal > kTmpl.acceptBase - kTmpl.acceptPerStrength * s) {
         return r;
     }
     if (ioScale != nullptr) {

@@ -52,9 +52,9 @@ inline double bilin(const uchar* data, ptrdiff_t step, double x, double y) {
     const double fy = y - y0;
     const uchar* row0 = data + static_cast<ptrdiff_t>(y0) * step;
     const uchar* row1 = row0 + step;
-    const double a = std::fma(row0[x0 + 1], fx, row0[x0] * (1.0 - fx));
-    const double b = std::fma(row1[x0 + 1], fx, row1[x0] * (1.0 - fx));
-    return std::fma(b, fy, a * (1.0 - fy));
+    const double a = row0[x0] * (1.0 - fx) + row0[x0 + 1] * fx;
+    const double b = row1[x0] * (1.0 - fx) + row1[x0 + 1] * fx;
+    return a * (1.0 - fy) + b * fy;
 }
 
 // One deinterlaced field: search the center of strongest circular symmetry within
@@ -116,7 +116,7 @@ MarkResult detect_one_field_csym(const cv::Mat& gFull, const CircularSymmetry& s
             const double x = cxRef - sr + static_cast<double>(ix) * gstep;
             const double dx = x - cxRef;
             const double dy = y - cyRef;
-            if (std::fma(dx, dx, dy * dy) > sr2) {
+            if (dx * dx + dy * dy > sr2) {
                 continue;
             }
             double e = 0.0;
@@ -140,7 +140,7 @@ MarkResult detect_one_field_csym(const cv::Mat& gFull, const CircularSymmetry& s
             const double x = c0.x + ix;
             const double dx = x - cxRef;
             const double dy = y - cyRef;
-            if (std::fma(dx, dx, dy * dy) > sr2) {
+            if (dx * dx + dy * dy > sr2) {
                 continue;
             }
             double e = 0.0;
@@ -166,8 +166,8 @@ MarkResult detect_one_field_csym(const cv::Mat& gFull, const CircularSymmetry& s
     const double sD = sym.score(g, c1.x, c1.y + 1.0, et, 1, median);
     double dx = 0.0;
     double dy = 0.0;
-    const double denx = std::fma(-2.0, c1.s, sL + sR);
-    const double deny = std::fma(-2.0, c1.s, sU + sD);
+    const double denx = sL - 2.0 * c1.s + sR;
+    const double deny = sU - 2.0 * c1.s + sD;
     if (denx < 0.0) {
         dx = 0.5 * (sL - sR) / denx;
     }
@@ -198,7 +198,7 @@ CircularSymmetry::CircularSymmetry(double minRadiusPx, double maxRadiusPx, int r
     ringStart_.reserve(static_cast<size_t>(nRings) + 1);
     ringR_.reserve(static_cast<size_t>(nRings));
     for (int ri = 0; ri < nRings; ++ri) {
-        const double rr = std::fma(static_cast<double>(ri), ringStep, minRadiusPx);
+        const double rr = minRadiusPx + static_cast<double>(ri) * ringStep;
         const int m = std::max(8, static_cast<int>(std::lround(2.0 * CV_PI * rr)));
         ringStart_.push_back(static_cast<int>(ox_.size()));
         ringR_.push_back(static_cast<float>(rr));
@@ -243,19 +243,19 @@ double CircularSymmetry::score(const cv::Mat& g, double cx, double cy, double& e
             }
             const double v = bilin(data, gstep, x, y);
             s += v;
-            s2 = std::fma(v, v, s2);
+            s2 += v * v;
             ++cnt;
             sumAll += v;
-            sumAll2 = std::fma(v, v, sumAll2);
+            sumAll2 += v * v;
             ++nAll;
         }
         if (cnt < 4) {
             continue;
         }
         const double mean = s / cnt;
-        double var = std::fma(-mean, mean, s2 / cnt);
+        double var = s2 / cnt - mean * mean;
         var = std::max(var, 0.0);
-        wRingVar = std::fma(cnt, var, wRingVar);
+        wRingVar += cnt * var;
         wSum += cnt;
         if (median && nRingVar < static_cast<int>(ringVars.size())) {
             ringVars[static_cast<size_t>(nRingVar++)] = static_cast<float>(var);
@@ -269,7 +269,7 @@ double CircularSymmetry::score(const cv::Mat& g, double cx, double cy, double& e
         return 0.0;
     }
     const double meanAll = sumAll / static_cast<double>(nAll);
-    double overallVar = std::fma(-meanAll, meanAll, sumAll2 / static_cast<double>(nAll));
+    double overallVar = sumAll2 / static_cast<double>(nAll) - meanAll * meanAll;
     overallVar = std::max(overallVar, 0.0);
     // Combine the per-ring variances. MEDIAN ignores a few glare-corrupted rings
     // (their high variance) that would otherwise inflate the mean and sink the
