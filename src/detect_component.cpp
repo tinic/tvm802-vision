@@ -74,16 +74,11 @@ constexpr std::array<CompProfile, 10> kProfiles = {{
     {.id = 9, .name = nullptr},
 }};
 
-// Subpixel location of an extremum in v[] near integer index i (parabola through
-// i-1, i, i+1). Returns i + delta, delta clamped to [-1, 1].
-double parabolic(const std::vector<float>& v, int i) {
-    const int n = static_cast<int>(v.size());
-    if (i <= 0 || i + 1 >= n) {
-        return static_cast<double>(i);
-    }
-    const auto a = static_cast<double>(v[static_cast<size_t>(i) - 1]);
-    const auto b = static_cast<double>(v[static_cast<size_t>(i)]);
-    const auto c = static_cast<double>(v[static_cast<size_t>(i) + 1]);
+// Subpixel location of an extremum at integer index i, given three sample values
+// at i-1, i, i+1. Returns i + delta with delta clamped to [-1, 1]. Three-value
+// form (vs taking a vector + index) so callers can supply the values directly
+// without materialising an intermediate buffer (see fit_axis below).
+double parabolic3(double a, double b, double c, int i) {
     const double den = a - 2.0 * b + c;
     if (std::abs(den) < 1e-9) {
         return static_cast<double>(i);
@@ -108,13 +103,18 @@ void projection(const cv::Mat& g, int dim, std::vector<float>& out) {
         p = p.reshape(1, 1);  // column vector -> row vector, uniform handling
     }
     const int n = p.cols;
-    out.assign(static_cast<size_t>(n), 0.0f);
-    float lo = p.at<float>(0, 0);
-    for (int i = 0; i < n; ++i) {
-        lo = std::min(lo, p.at<float>(0, i));
+    out.resize(static_cast<size_t>(n));  // no-init resize (vs assign which zeros first)
+    // Single base pointer + raw indexing: cv::Mat::at<float>() has per-access
+    // overhead the optimizer can't elide; the row is guaranteed contiguous after
+    // the reshape above so the float* hop is sound.
+    const float* src = p.ptr<float>(0);
+    float lo = src[0];
+    for (int i = 1; i < n; ++i) {
+        lo = std::min(lo, src[i]);
     }
+    float* dst = out.data();
     for (int i = 0; i < n; ++i) {
-        out[static_cast<size_t>(i)] = p.at<float>(0, i) - lo;
+        dst[i] = src[i] - lo;
     }
 }
 
@@ -123,10 +123,10 @@ void projection(const cv::Mat& g, int dim, std::vector<float>& out) {
 // edges (high energy); an off-axis part smears them (low). Used to score angle.
 double edge_energy(const std::vector<float>& proj) {
     const int n = static_cast<int>(proj.size());
+    const float* p = proj.data();
     double e = 0.0;
     for (int i = 1; i < n - 1; ++i) {
-        const double d = 0.5 * (static_cast<double>(proj[static_cast<size_t>(i) + 1]) -
-                                static_cast<double>(proj[static_cast<size_t>(i) - 1]));
+        const double d = 0.5 * (static_cast<double>(p[i + 1]) - static_cast<double>(p[i - 1]));
         e += d * d;
     }
     return e;
@@ -149,23 +149,28 @@ AxisFit fit_axis(const std::vector<float>& proj, int minSizePx) {
         return f;
     }
 
-    std::vector<float> d(static_cast<size_t>(n), 0.0f);
-    for (int i = 1; i < n - 1; ++i) {
-        d[static_cast<size_t>(i)] = 0.5f * (proj[static_cast<size_t>(i) + 1] -
-                                            proj[static_cast<size_t>(i) - 1]);
-    }
-
-    int li = 1;
-    int ri = n - 2;
+    // Central-difference derivative. thread_local so the buffer is reused across
+    // calls (this function fires ~100 times per detect_component); plain
+    // resize-without-shrink avoids the per-call heap allocation.
+    static thread_local std::vector<float> d;
+    d.resize(static_cast<size_t>(n));
+    const float* psrc = proj.data();
+    float* dptr = d.data();
+    dptr[0] = 0.0f;
+    dptr[n - 1] = 0.0f;
     float dmax = -1e30f;
     float dmin = 1e30f;
+    int li = 1;
+    int ri = n - 2;
     for (int i = 1; i < n - 1; ++i) {
-        if (d[static_cast<size_t>(i)] > dmax) {
-            dmax = d[static_cast<size_t>(i)];
+        const float di = 0.5f * (psrc[i + 1] - psrc[i - 1]);
+        dptr[i] = di;
+        if (di > dmax) {
+            dmax = di;
             li = i;
         }
-        if (d[static_cast<size_t>(i)] < dmin) {
-            dmin = d[static_cast<size_t>(i)];
+        if (di < dmin) {
+            dmin = di;
             ri = i;
         }
     }
@@ -173,12 +178,13 @@ AxisFit fit_axis(const std::vector<float>& proj, int minSizePx) {
         return f;  // a real pulse rises (left) before it falls (right)
     }
 
-    std::vector<float> dabs(static_cast<size_t>(n), 0.0f);
-    for (int i = 0; i < n; ++i) {
-        dabs[static_cast<size_t>(i)] = std::abs(d[static_cast<size_t>(i)]);
-    }
-    const double lpos = parabolic(dabs, li);
-    const double rpos = parabolic(dabs, ri);
+    // Sub-pixel refine via parabolic interpolation around li / ri. We only need
+    // |d| at 6 indices (li-1, li, li+1 and the same around ri); fetch on the fly
+    // instead of materialising a full |d| buffer over n samples.
+    const double lpos =
+        parabolic3(std::abs(dptr[li - 1]), std::abs(dptr[li]), std::abs(dptr[li + 1]), li);
+    const double rpos =
+        parabolic3(std::abs(dptr[ri - 1]), std::abs(dptr[ri]), std::abs(dptr[ri + 1]), ri);
     const double size = rpos - lpos;
     if (size < static_cast<double>(minSizePx)) {
         return f;
@@ -211,9 +217,27 @@ AxisFit fit_axis(const std::vector<float>& proj, int minSizePx) {
 
 // Rotate the ROI by `deg` (CCW) about its center; out is the axis-aligned view at
 // that trial angle. M is returned so the found center can be mapped back to the ROI.
+//
+// Writes the 2x3 rotation matrix coefficients in-place into M instead of going
+// through cv::getRotationMatrix2D, which allocates a fresh 2x3 Mat per call.
+// Bit-identical to OpenCV's implementation: alpha = cos(angle), beta = sin(angle)
+// after angle * PI / 180 -- same constants, same order of ops, same float math.
 void rotate_roi(const cv::Mat& roi, double deg, cv::Mat& out, cv::Mat& M) {
-    const cv::Point2f c(static_cast<float>(roi.cols) * 0.5f, static_cast<float>(roi.rows) * 0.5f);
-    M = cv::getRotationMatrix2D(c, deg, 1.0);
+    if (M.empty() || M.rows != 2 || M.cols != 3 || M.type() != CV_64FC1) {
+        M.create(2, 3, CV_64FC1);
+    }
+    const double rad = deg * CV_PI / 180.0;
+    const double a = std::cos(rad);
+    const double b = std::sin(rad);
+    const double cx = static_cast<double>(roi.cols) * 0.5;
+    const double cy = static_cast<double>(roi.rows) * 0.5;
+    auto* m = M.ptr<double>();
+    m[0] = a;
+    m[1] = b;
+    m[2] = (1.0 - a) * cx - b * cy;
+    m[3] = -b;
+    m[4] = a;
+    m[5] = b * cx + (1.0 - a) * cy;
     cv::warpAffine(roi, out, M, roi.size(), cv::INTER_LINEAR, cv::BORDER_REPLICATE);
 }
 

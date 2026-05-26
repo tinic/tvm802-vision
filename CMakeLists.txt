@@ -3,6 +3,17 @@ project(MVision LANGUAGES CXX)
 
 option(BUILD_TESTS "Build the offline OpenCV detector test harness (host arch)" OFF)
 
+# Default to Release for single-config generators (Unix Makefiles, Ninja) when
+# the user hasn't picked one. Without this, an empty CMAKE_BUILD_TYPE means
+# CMake passes NO optimization flags to GCC/Clang and the host-side mvision-tune
+# binary runs unoptimized -- a 2-5x slowdown vs Release for no reason. Multi-
+# config generators (Visual Studio) ignore CMAKE_BUILD_TYPE; their per-config
+# flags (e.g. Release /O2) are set in the MSVC block below.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING
+        "Build type (Debug / Release / RelWithDebInfo / MinSizeRel)" FORCE)
+endif()
+
 # C++23 for std::format-based diagnostics/UI text (no snprintf / fixed char buffers)
 # and std::array throughout. The detector core + Win32 TUs only use <= C++20 library
 # features, so dropping back to 20 here stays buildable if a toolchain lacks C++23.
