@@ -219,7 +219,7 @@ cmake --build build -j
 On macOS: `brew install opencv`; on Debian/Ubuntu: `apt install libopencv-dev`;
 on Windows the x86 vcpkg flow already pulls OpenCV (and produces the DLL too).
 
-**Use** — pass a `CompThre` value and watch the overlay update:
+**Single-frame mode** — pass a `CompThre` value and watch the overlay update:
 
 ```bash
 mvision-tune --thr 50 captures/comp_0042.png   # auto-detect terminal
@@ -230,6 +230,33 @@ mvision-tune --proto none frame.png            # write PNG to ./mvision_tune_ove
 Detected protocols cover iTerm2 (incl. SSH via `LC_TERMINAL`), kitty + Ghostty,
 Windows Terminal ≥ 1.22, VS Code integrated terminal (≥ 1.80); the fallback
 writes the overlay PNG to `mvision_tune_overlay.png` in the current directory.
+
+**Corpus-batch mode** — answer "is this part stable?" in one command:
+
+```bash
+mvision-tune --thr 50 --corpus captures/0603/      # all frames at once
+mvision-tune --thr 30 --corpus tests/corpus/sot23  # public sample
+```
+
+Scans `DIR/*.png`, runs `detect_component` over each, prints per-frame CSV to
+stdout, and on stderr a summary with σ across the locked-on set:
+
+```
+  files=3  found=3 (100%)  read_errors=0
+  methods: symmetry=3  minarearect=0  none=0
+  cx     mean=313.87  sigma=0.69  px
+  cy     mean=238.60  sigma=0.92  px
+  w      mean=50.60  sigma=0.19  px
+  h      mean=50.43  sigma=0.30  px
+  angle  mean=44.80  sigma=0.14  deg  (circular)
+  qual   mean=0.999 sigma=0.001
+```
+
+`sigma` uses circular statistics for `angle` (the detector normalises to
+(-45°, 45]; readings at +44° and -44° are 2° apart modulo 90, not 88) and
+plain standard deviation for the linear quantities. A part that locks within
+sub-pixel `cx`/`cy` σ across a dozen captures is stable; double-digit σ is the
+prompt to look at what's wandering.
 
 ### Code-level
 

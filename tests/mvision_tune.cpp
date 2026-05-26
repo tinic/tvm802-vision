@@ -1,24 +1,36 @@
 // mvision-tune -- offline component-detector tuner with inline-image preview.
-// Single PNG in, the production detect_component() over it, the same green-box
-// overlay the live preview renders, and an inline-image escape printed to the
-// terminal (sixel / kitty / iTerm2 -- auto-picked from environment variables,
-// mirroring the detection in png2amiga/src/main.cpp). For tuning a specific
-// part class against a captured snapshot without redeploying the DLL.
+// Two modes:
+//
+//   SINGLE FRAME: pass one PNG. Runs detect_component() over it, renders the
+//                 same green-box overlay the live preview draws, and prints the
+//                 result inline in your terminal via sixel / kitty / iTerm2
+//                 (auto-detected from env, mirroring png2amiga). For tuning a
+//                 specific part class against a captured snapshot without
+//                 redeploying the DLL.
+//
+//   CORPUS BATCH: pass --corpus DIR. Scans DIR/*.png, runs detect_component on
+//                 each, prints per-frame CSV to stdout plus an aggregate
+//                 stats summary on stderr -- found count, method histogram,
+//                 and sigma (cx, cy, w, h, angle) across the locked-on set.
+//                 This is the "is this part stable?" answer in one command.
+//                 No sixel in corpus mode (would flood the terminal).
 //
 // Cross-platform: needs OpenCV (core/imgproc/imgcodecs) and a C++23 toolchain.
 // Built by the standard cmake flow on Linux / macOS / Windows.
 //
 // Usage:
-//   mvision-tune [options] frame.png
+//   mvision-tune [options] frame.png            (single-frame; sixel/kitty/iterm)
+//   mvision-tune [options] --corpus DIR          (batch stats; no preview)
 // Options:
 //   --thr N         Override CompThre (0-100; 0 = detector default)
 //   --w PX --h PX   Expected body size in px (prior; default unknown -> 0)
 //   --a DEG         Expected angle in deg (prior; default NaN -> no prior)
-//   --scale N       Upscale the rendered preview NxN (default 1; useful on a hidpi
-//                   terminal to make the 640x480 frame readable inline)
+//   --scale N       Single-frame mode only: upscale the rendered preview NxN
+//                   (default 1; useful on a hidpi terminal to make the 640x480
+//                   frame readable inline)
 //   --proto P       Force terminal protocol: sixel | kitty | iterm | none
-//                   (default: auto-detect from env). `none` writes the overlay PNG
-//                   to mvision_tune_overlay.png in CWD and skips terminal output.
+//                   (default: auto-detect from env). `none` writes the overlay
+//                   PNG to mvision_tune_overlay.png in CWD and skips emit.
 
 #include "vision.h"
 
@@ -29,13 +41,16 @@
 
 #include "constixel.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <limits>
+#include <numbers>
 #include <string>
 #include <string_view>
 #include <unordered_set>
@@ -288,6 +303,167 @@ void emit_png_chunked(Proto p, const cv::Mat& bgr) {
     std::fputc('\n', stdout);
 }
 
+// ---------------------------------------------------------------------------
+// Stats accumulator. Linear σ for the bounded values (cx, cy, w, h); circular
+// σ for angle. The detector normalizes angle to (-45, 45], so two adjacent
+// reads at +44 / -44 are 2 deg apart (mod 90), not 88 -- circular stats catch
+// that. We compute it in the doubled-angle space and halve back at the end.
+// ---------------------------------------------------------------------------
+
+struct LinearStat {
+    int n = 0;
+    double sum = 0.0;
+    double sumSq = 0.0;
+    void push(double x) {
+        ++n;
+        sum += x;
+        sumSq += x * x;
+    }
+    [[nodiscard]] double mean() const { return n > 0 ? sum / n : 0.0; }
+    [[nodiscard]] double sigma() const {
+        if (n < 2) return 0.0;
+        const double m = mean();
+        const double v = sumSq / static_cast<double>(n) - m * m;
+        return std::sqrt(std::max(0.0, v));
+    }
+};
+
+struct CircularAngleStat {
+    int n = 0;
+    double sumCos = 0.0;
+    double sumSin = 0.0;
+    void push(double angleDeg) {
+        // The detector's angle is normalized to (-45, 45] (90-deg-symmetric
+        // rectangle) -- double it before going to the unit circle so the
+        // 90-deg wrap becomes a 360-deg full circle, halve back after.
+        const double a2 = 2.0 * angleDeg * std::numbers::pi / 180.0;
+        ++n;
+        sumCos += std::cos(a2);
+        sumSin += std::sin(a2);
+    }
+    [[nodiscard]] double mean_deg() const {
+        if (n == 0) return 0.0;
+        return 0.5 * std::atan2(sumSin, sumCos) * 180.0 / std::numbers::pi;
+    }
+    [[nodiscard]] double sigma_deg() const {
+        // Circular standard deviation: sqrt(-2 ln R) in the doubled-angle
+        // space, halved back to the original angle space. R is the mean
+        // resultant length; R=1 -> perfectly clustered, R~0 -> uniform.
+        if (n < 2) return 0.0;
+        const double R = std::hypot(sumCos / n, sumSin / n);
+        if (R <= 1e-9) return 90.0;  // saturated -- as scattered as possible
+        const double sdRad = std::sqrt(-2.0 * std::log(R));
+        return 0.5 * sdRad * 180.0 / std::numbers::pi;
+    }
+};
+
+// Run detect_component on one PNG. Returns false on a read error (file
+// missing / not a valid image); the caller handles the "found / not found"
+// distinction via the CompResult itself.
+bool run_one(const std::string& path, double expW, double expH, double expA, int threshold,
+             vis::CompResult& out) {
+    cv::Mat img = cv::imread(path, cv::IMREAD_COLOR);
+    if (img.empty()) {
+        return false;
+    }
+    IplImage ipl = make_ipl(img);
+    out = vis::detect_component(&ipl, expW, expH, expA, threshold,
+                                /*refX=*/-1.0, /*refY=*/-1.0, /*searchRadiusPx=*/0);
+    return true;
+}
+
+const char* method_name(vis::CompResult::Method m) {
+    return m == vis::CompResult::Method::Symmetry      ? "symmetry"
+           : m == vis::CompResult::Method::MinAreaRect ? "minarearect"
+                                                       : "none";
+}
+
+int run_corpus(const std::string& dir, double expW, double expH, double expA, int threshold) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (!fs::is_directory(dir, ec)) {
+        std::fprintf(stderr, "mvision-tune: --corpus %s is not a directory\n", dir.c_str());
+        return 2;
+    }
+    // Collect + sort the .png entries -- deterministic ordering matters
+    // because the per-frame CSV is what an operator scrolls to find a
+    // misbehaving frame.
+    std::vector<std::string> files;
+    for (auto& entry : fs::directory_iterator(dir, ec)) {
+        if (!entry.is_regular_file()) continue;
+        auto ext = entry.path().extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (ext == ".png") {
+            files.push_back(entry.path().string());
+        }
+    }
+    std::sort(files.begin(), files.end());
+    if (files.empty()) {
+        std::fprintf(stderr, "mvision-tune: no .png files in %s\n", dir.c_str());
+        return 1;
+    }
+
+    LinearStat sCx, sCy, sW, sH, sQuality;
+    CircularAngleStat sAngle;
+    int nFound = 0;
+    int nSym = 0;
+    int nMar = 0;
+    int nNone = 0;
+    int nReadError = 0;
+
+    std::printf("file,found,cx,cy,w,h,angle,quality,method\n");
+    for (const auto& path : files) {
+        vis::CompResult r;
+        if (!run_one(path, expW, expH, expA, threshold, r)) {
+            std::printf("%s,READ_ERROR\n", path.c_str());
+            ++nReadError;
+            continue;
+        }
+        std::printf("%s,%d,%.2f,%.2f,%.2f,%.2f,%.2f,%.3f,%s\n", path.c_str(),
+                    r.found ? 1 : 0, r.cx, r.cy, r.w, r.h, r.angle, r.quality, method_name(r.method));
+        if (r.found) {
+            ++nFound;
+            sCx.push(r.cx);
+            sCy.push(r.cy);
+            sW.push(r.w);
+            sH.push(r.h);
+            sAngle.push(r.angle);
+            sQuality.push(r.quality);
+            switch (r.method) {
+                case vis::CompResult::Method::Symmetry:    ++nSym; break;
+                case vis::CompResult::Method::MinAreaRect: ++nMar; break;
+                case vis::CompResult::Method::None:        ++nNone; break;
+            }
+        }
+    }
+    const int nTotal = static_cast<int>(files.size());
+    std::fprintf(stderr,
+                 "\nmvision-tune corpus: %s  thr=%d\n"
+                 "  files=%d  found=%d (%.0f%%)  read_errors=%d\n"
+                 "  methods: symmetry=%d  minarearect=%d  none=%d\n",
+                 dir.c_str(), threshold, nTotal, nFound,
+                 nTotal > 0 ? (100.0 * nFound / nTotal) : 0.0, nReadError, nSym, nMar, nNone);
+    if (nFound >= 2) {
+        std::fprintf(stderr,
+                     "  cx     mean=%.2f  sigma=%.2f  px\n"
+                     "  cy     mean=%.2f  sigma=%.2f  px\n"
+                     "  w      mean=%.2f  sigma=%.2f  px\n"
+                     "  h      mean=%.2f  sigma=%.2f  px\n"
+                     "  angle  mean=%.2f  sigma=%.2f  deg  (circular)\n"
+                     "  qual   mean=%.3f sigma=%.3f\n",
+                     sCx.mean(), sCx.sigma(),
+                     sCy.mean(), sCy.sigma(),
+                     sW.mean(), sW.sigma(),
+                     sH.mean(), sH.sigma(),
+                     sAngle.mean_deg(), sAngle.sigma_deg(),
+                     sQuality.mean(), sQuality.sigma());
+    } else if (nFound == 1) {
+        std::fprintf(stderr, "  (only 1 found -- no spread)\n");
+    }
+    return nFound > 0 ? 0 : 1;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -299,6 +475,7 @@ int main(int argc, char** argv) {
     Proto forced = Proto::none;
     bool protoForced = false;
     const char* path = nullptr;
+    const char* corpus = nullptr;
 
     for (int i = 1; i < argc; ++i) {
         auto need = [&](const char* flag) -> const char* {
@@ -309,12 +486,13 @@ int main(int argc, char** argv) {
             return argv[++i];
         };
         std::string_view a(argv[i]);
-        if (a == "--w")        expW = std::atof(need("--w"));
-        else if (a == "--h")   expH = std::atof(need("--h"));
-        else if (a == "--a")   expA = std::atof(need("--a"));
-        else if (a == "--thr") threshold = std::atoi(need("--thr"));
-        else if (a == "--scale") scale = std::max(1, std::min(8, std::atoi(need("--scale"))));
-        else if (a == "--proto") { forced = parse_proto(need("--proto")); protoForced = true; }
+        if (a == "--w")               expW = std::atof(need("--w"));
+        else if (a == "--h")          expH = std::atof(need("--h"));
+        else if (a == "--a")          expA = std::atof(need("--a"));
+        else if (a == "--thr")        threshold = std::atoi(need("--thr"));
+        else if (a == "--scale")      scale = std::max(1, std::min(8, std::atoi(need("--scale"))));
+        else if (a == "--proto")    { forced = parse_proto(need("--proto")); protoForced = true; }
+        else if (a == "--corpus")     corpus = need("--corpus");
         else if (a.size() > 0 && a[0] == '-') {
             std::fprintf(stderr, "mvision-tune: unknown flag %s\n", argv[i]);
             return 2;
@@ -322,10 +500,20 @@ int main(int argc, char** argv) {
             path = argv[i];
         }
     }
-    if (!path) {
+    if (corpus != nullptr) {
+        if (path != nullptr) {
+            std::fprintf(stderr,
+                         "mvision-tune: --corpus and a positional frame are mutually "
+                         "exclusive; pick one.\n");
+            return 2;
+        }
+        return run_corpus(corpus, expW, expH, expA, threshold);
+    }
+    if (path == nullptr) {
         std::fprintf(stderr,
                      "usage: mvision-tune [--thr N] [--w PX] [--h PX] [--a DEG] "
-                     "[--scale N] [--proto sixel|kitty|iterm|none] frame.png\n");
+                     "[--scale N] [--proto sixel|kitty|iterm|none] frame.png\n"
+                     "       mvision-tune [--thr N] ... --corpus DIR/        (batch stats)\n");
         return 2;
     }
 
@@ -356,16 +544,12 @@ int main(int argc, char** argv) {
     }
 
     Proto proto = protoForced ? forced : detect_proto();
-    const char* method =
-        r.method == vis::CompResult::Method::Symmetry      ? "symmetry"
-        : r.method == vis::CompResult::Method::MinAreaRect ? "minarearect"
-                                                           : "none";
     // Summary on stderr so it survives stdout-redirection.
     std::fprintf(stderr,
                  "mvision-tune: %s  proto=%s  thr=%d  found=%d  "
                  "cx=%.2f cy=%.2f w=%.2f h=%.2f angle=%.2f q=%.3f method=%s\n",
                  path, proto_name(proto), threshold, r.found ? 1 : 0,
-                 r.cx, r.cy, r.w, r.h, r.angle, r.quality, method);
+                 r.cx, r.cy, r.w, r.h, r.angle, r.quality, method_name(r.method));
 
     if (proto == Proto::none) {
         const char* outPath = "mvision_tune_overlay.png";  // CWD-relative; cross-platform
