@@ -624,13 +624,27 @@ int __stdcall CheckComp(void* f, int hwnd, int w, int h) {
             mv::orig::CheckComp(f, hwnd, w, h);  // original: result for the log + render fallback
             rc = 0;
         } else {
-            // No part near the nozzle. A synthetic zero/reference offset WANDERS: the host
-            // subtracts an internal nozzle calibration (not the up-vision offset, which is
-            // 0 here) and keeps applying a correction until timeout, then places randomly.
-            // So fall back to the original (stable -- it converges on its own blob and
-            // places where the part was) until a wander-free reject is worked out.
-            g_resultSrc = ResultSrc::Original;
-            rc = mv::orig::CheckComp(f, hwnd, w, h);
+            // Signal NOT-FOUND to the host by reporting a zero-size GetOffset
+            // packing. In our comp packing (see set_our_comp_result above)
+            // GetOffset.x carries the detected component size W; a real part
+            // always has W > 0, so W = 0 is the host-visible "no part" signal.
+            // The host then handles the missing-part case via its own retry
+            // path -- a controlled stop after a few retries if the part is
+            // genuinely absent -- instead of the OLD behavior of forwarding
+            // to the original DLL, which locks onto a stray blob and places a
+            // phantom part there. This closes the missing-part-reject gap
+            // called out in README ("Status -> Known gap").
+            g_compX = 0.0;                  // GetOffset x = size W -> 0 = NOT-FOUND sentinel
+            g_compY = 0.0;                  // GetOffset y = size H
+            g_compW = 0.0;                  // GetOffset w = offset X
+            g_compH = 0.0;                  // GetOffset h = offset Y
+            g_compA = 0.0;                  // GetOffset a = angle
+            g_compMin = 1.0;                // worst quality
+            g_resultSrc = ResultSrc::Comp;  // OUR not-found governs GetOffset/GetMin_val
+            // Still invoke the original so its preview/log side effects run; we
+            // discard its result -- g_resultSrc=Comp owns the GetOffset table.
+            mv::orig::CheckComp(f, hwnd, w, h);
+            rc = 0;
         }
     } else {
         g_resultSrc = ResultSrc::Original;  // shadow mode: original drives

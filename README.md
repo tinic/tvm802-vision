@@ -54,10 +54,11 @@ preview, and forwards everything else to the original — which you rename to
   down view. Live tuning shares the `Ctrl+Alt+M` dialog (pick **Component** from the mode
   dropdown). Per-detector on/off checkboxes let an operator fall any method back to the
   stock vision.
-  - [ ] **Known gap:** when no part is on the nozzle (e.g. dropped in flight), it does
-    not yet *reject* the placement — it falls back to the stock detector. A clean reject
-    needs the host's internal nozzle-calibration, which isn't exposed; tracked for future
-    work.
+  - [x] **Missing-part reject** (no part on the nozzle, e.g. dropped in flight): the
+    detector signals not-found to the host by reporting a zero component-size in its
+    result table; the host's own retry / controlled-stop path then handles it, instead
+    of placing a phantom part where the stock detector would have locked onto a stray
+    blob. Replaced the earlier fall-back-to-stock behaviour.
 
 Contributions and test reports (especially on the 802A) are welcome.
 

@@ -218,8 +218,15 @@ void rotate_roi(const cv::Mat& roi, double deg, cv::Mat& out, cv::Mat& M) {
 }
 
 // Best orientation: the trial angle whose axis-aligned projections carry the most
-// silhouette edge energy. Coarse sweep over (-span, span], then a fine refine.
-double best_angle(const cv::Mat& roi) {
+// silhouette edge energy. Coarse sweep over a range, then a fine refine.
+//
+// When the host passes a meaningful expected angle (via SetCompAngle / SetCompSizeWHA)
+// we narrow the coarse sweep to prior +/- kPriorHalfSpan instead of the full
+// (-span, span]. The placement loop's per-part CSV always carries the expected
+// orientation, so the prior is reliable in practice. If the narrow sweep's best
+// lands ON the boundary (i.e. truth is outside the window -- e.g. operator put a
+// part in upside-down), we expand to the full sweep so accuracy is preserved.
+double best_angle(const cv::Mat& roi, double priorDeg = std::numeric_limits<double>::quiet_NaN()) {
     cv::Mat rot;
     cv::Mat M;
     std::vector<float> px;
@@ -231,24 +238,68 @@ double best_angle(const cv::Mat& roi) {
         return edge_energy(px) + edge_energy(py);
     };
 
-    // Integer-indexed sweeps (no floating-point loop counters): coarse over the full
-    // (-span, span], then fine around the coarse winner.
+    // Choose coarse sweep range. With a finite prior, narrow to prior +/- half-span;
+    // otherwise full (-span, span]. Half-span generously covers expected drift
+    // (parts in tape are at fixed orientation, drift due to pickup is ~few degrees).
+    constexpr double kPriorHalfSpan = 15.0;
+    double sweepLo = -kComp.angleSpanDeg;
+    double sweepHi = kComp.angleSpanDeg;
+    bool narrowed = false;
+    if (std::isfinite(priorDeg)) {
+        double p = priorDeg;
+        while (p > 45.0) {
+            p -= 90.0;
+        }
+        while (p <= -45.0) {
+            p += 90.0;
+        }
+        sweepLo = p - kPriorHalfSpan;
+        sweepHi = p + kPriorHalfSpan;
+        narrowed = true;
+    }
+    // (else: sweepLo/Hi already initialised to the full (-span, span] above)
+
+    // Coarse sweep -- integer-indexed (no floating-point loop counters).
     double bestDeg = 0.0;
     double bestScore = -1.0;
-    const int nCoarse = static_cast<int>(std::lround(2.0 * kComp.angleSpanDeg / kComp.angleCoarseStepDeg));
+    int bestI = -1;
+    const int nCoarse =
+        static_cast<int>(std::lround((sweepHi - sweepLo) / kComp.angleCoarseStepDeg));
     for (int i = 0; i <= nCoarse; ++i) {
-        const double deg = -kComp.angleSpanDeg + static_cast<double>(i) * kComp.angleCoarseStepDeg;
+        const double deg = sweepLo + static_cast<double>(i) * kComp.angleCoarseStepDeg;
         const double s = score_at(deg);
         if (s > bestScore) {
             bestScore = s;
             bestDeg = deg;
+            bestI = i;
         }
     }
+    // Boundary check: if the narrow sweep's best is at i=0 or i=nCoarse, the true
+    // best may lie outside the window. Expand to the full sweep and rescore
+    // everything (the savings disappear in this rare edge case but accuracy is
+    // preserved -- the prior was wrong).
+    if (narrowed && (bestI == 0 || bestI == nCoarse)) {
+        bestScore = -1.0;
+        const int nCoarseFull = static_cast<int>(
+            std::lround(2.0 * kComp.angleSpanDeg / kComp.angleCoarseStepDeg));
+        for (int i = 0; i <= nCoarseFull; ++i) {
+            const double deg =
+                -kComp.angleSpanDeg + static_cast<double>(i) * kComp.angleCoarseStepDeg;
+            const double s = score_at(deg);
+            if (s > bestScore) {
+                bestScore = s;
+                bestDeg = deg;
+            }
+        }
+    }
+    // Fine refine: +/- one coarse step around the winner.
     double refineBest = bestDeg;
     double refineScore = bestScore;
-    const int nFine = static_cast<int>(std::lround(2.0 * kComp.angleCoarseStepDeg / kComp.angleFineStepDeg));
+    const int nFine =
+        static_cast<int>(std::lround(2.0 * kComp.angleCoarseStepDeg / kComp.angleFineStepDeg));
     for (int i = 0; i <= nFine; ++i) {
-        const double deg = bestDeg - kComp.angleCoarseStepDeg + static_cast<double>(i) * kComp.angleFineStepDeg;
+        const double deg =
+            bestDeg - kComp.angleCoarseStepDeg + static_cast<double>(i) * kComp.angleFineStepDeg;
         const double s = score_at(deg);
         if (s > refineScore) {
             refineScore = s;
@@ -273,7 +324,10 @@ void normalize_pose(double& w, double& h, double& angle) {
 
 // If a non-square size prior is available, choose between the as-is labeling and the
 // +90/swap labeling whichever (w,h) better matches (expW,expH). Resolves the
-// 90-deg W<->H ambiguity using the host's expected geometry.
+// 90-deg W<->H ambiguity using the host's expected geometry. No-prior reports
+// the rectangle exactly as the detector measured it -- mvision's job is to
+// REPORT the pose, not impose a long-axis convention; the host is the source
+// of truth for which dimension is "W" vs "H".
 void disambiguate_with_prior(double& w, double& h, double& angle,
                              double expW, double expH) {
     if (expW <= 0.0 || expH <= 0.0) {
@@ -497,7 +551,9 @@ CompResult detect_component(const void* frame,
         cv::GaussianBlur(sub, g, cv::Size(gk, gk), 1.0);
 
         // --- Primary: rectlinear symmetry ---
-        const double aDeg = best_angle(g);
+        // Pass the host's expected-angle prior (from SetCompAngle / SetCompSizeWHA)
+        // to narrow the coarse search ~3x. NaN = no prior -> full sweep.
+        const double aDeg = best_angle(g, expectedAngleDeg);
         cv::Mat rot;
         cv::Mat M;
         rotate_roi(g, aDeg, rot, M);
@@ -536,7 +592,7 @@ CompResult detect_component(const void* frame,
             r.angle = angle;
             r.quality = std::min(fx.sym, fy.sym);  // weakest axis governs confidence
             r.method = CompResult::Method::Symmetry;
-            (void)expectedAngleDeg;  // reserved: narrow the angle search once data exists
+            // (expectedAngleDeg is consumed by best_angle() above to narrow the coarse search)
             if (!plausible_part(r.cx, r.cy, r.w, r.h, rxF, ryF, sr, crop, cfg.radiusMaxPx)) {
                 r.found = false;
             }
