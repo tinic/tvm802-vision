@@ -117,6 +117,16 @@ CompResult detect_component(const void* frame,
                             double refX = -1.0, double refY = -1.0,
                             int searchRadiusPx = 0);
 
+// CompThre profile-slot introspection. Operator-typed values 0-9 are
+// reserved as detector-profile slots (0=AUTO sentinel, 1-9 reserved for
+// per-board fills as real PCBs demand them; today all 1-9 are empty
+// and fall through to AUTO). 10-100 stay the manual %-of-max threshold.
+// profile_name(i) returns "AUTO" for slot 0, nullptr for an empty slot,
+// or the profile's name once authored. comp_profile_count is the size
+// of the registry (always 10).
+const char* comp_profile_name(int slot);
+int comp_profile_count();
+
 // Cheap sparse FNV-1a hash of an IplImage* frame buffer (samples a grid). Two
 // reads with the same hash are (almost certainly) the same camera frame — used
 // to detect stale/duplicate frames from QueryFrame. Returns 0 for an invalid or

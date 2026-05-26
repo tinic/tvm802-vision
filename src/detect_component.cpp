@@ -44,6 +44,36 @@ struct CompParams {
 };
 constexpr CompParams kComp;
 
+// CompThre profile slots. The operator-typed 视觉阈值 column accepts 0-100;
+// the upper 90% of that range (10-100) is the existing manual %-of-max-
+// brightness threshold. Values 0-9 are RESERVED for "special profiles" --
+// detector presets we'll fill in per-board as real PCBs demand custom
+// tuning (chip / LED / SOT / IC families, etc.). Today all 1-9 slots are
+// EMPTY (name == nullptr) and fall through to the AUTO path -- identical
+// to threshold == 0 -- so reserving them is invisible until a profile is
+// actually written. 0 is the AUTO sentinel.
+struct CompProfile {
+    int id;            // 0..9
+    const char* name;  // nullptr if slot empty (reserved-but-unfilled)
+    // FUTURE FIELDS (none yet -- filled in as profiles are authored):
+    //   int  thresholdPct;     // override the %-of-max threshold
+    //   int  blurKernel;       // override the pre-blur kernel (odd, 3..9)
+    //   bool maskNozzle;       // mask the known nozzle circle out of the ROI
+    //   bool fallbackOnly;     // skip symmetry, use minAreaRect path only
+};
+constexpr std::array<CompProfile, 10> kProfiles = {{
+    {.id = 0, .name = "AUTO"},
+    {.id = 1, .name = nullptr},
+    {.id = 2, .name = nullptr},
+    {.id = 3, .name = nullptr},
+    {.id = 4, .name = nullptr},
+    {.id = 5, .name = nullptr},
+    {.id = 6, .name = nullptr},
+    {.id = 7, .name = nullptr},
+    {.id = 8, .name = nullptr},
+    {.id = 9, .name = nullptr},
+}};
+
 // Subpixel location of an extremum in v[] near integer index i (parabola through
 // i-1, i, i+1). Returns i + delta, delta clamped to [-1, 1].
 double parabolic(const std::vector<float>& v, int i) {
@@ -274,7 +304,9 @@ CompResult minarea_fallback(const cv::Mat& g, const cv::Rect& crop,
     if (maxv < 8.0) {
         return r;
     }
-    const double pct = (threshold > 0 && threshold <= 100) ? threshold : 30.0;
+    // 10-100 = manual %-of-max. 0-9 = profile slot (all empty today; use
+    // the default %). See detect_component() for the full routing.
+    const double pct = (threshold >= 10 && threshold <= 100) ? threshold : 30.0;
     const double thrUse = (pct / 100.0) * maxv;
     cv::Mat bin;
     cv::threshold(g, bin, thrUse, 255.0, cv::THRESH_BINARY);
@@ -383,7 +415,23 @@ CompResult detect_component(const void* frame,
     r.imgOrigin = ipl->origin;
     r.frameHash = frame_hash(frame);
 
-    const int thr = (threshold > 0) ? threshold : kComp.defaultThreshold;
+    // Resolve the operator-typed CompThre value into the detector's working
+    // threshold. 0-9 are profile slots (today all empty -> AUTO defaults);
+    // 10-100 are the manual %-of-max-brightness path.
+    int thr = kComp.defaultThreshold;  // AUTO default
+    if (threshold >= 10 && threshold <= 100) {
+        thr = threshold;
+    } else if (threshold >= 1 && threshold <= 9) {
+        // Profile slot lookup. All slots empty today -> thr stays at the AUTO
+        // default. A filled-in profile (future) will override thr (and other
+        // detector params) here. The slot is still RESERVED so the operator's
+        // typed value is recognized as "this is a profile, not a percentage".
+        // (We deliberately do NOT treat low percentage values 1-9 as
+        // thresholds -- they'd binarise far too aggressively. If an operator
+        // really wants a 9% threshold they can type 10 instead.)
+        const auto& p = kProfiles[static_cast<std::size_t>(threshold)];
+        (void)p;  // no-op until a profile is authored
+    }
 
     // EXCEPTION BARRIER: called across a plain C ABI from the host. Never let an
     // OpenCV/STL exception unwind past this boundary (UB) -- report not-found.
@@ -544,6 +592,21 @@ CompResult detect_component(const void* frame,
         r.found = false;
         return r;
     }
+}
+
+// Profile-registry introspection (see vision.h). Returns the slot's name
+// when authored, nullptr when the slot is empty/reserved, and nullptr for
+// any out-of-range index. Callers (e.g. the settings UI's profile dropdown)
+// use a nullptr return to render the slot as "(reserved)".
+const char* comp_profile_name(int slot) {
+    if (slot < 0 || slot >= static_cast<int>(kProfiles.size())) {
+        return nullptr;
+    }
+    return kProfiles[static_cast<std::size_t>(slot)].name;
+}
+
+int comp_profile_count() {
+    return static_cast<int>(kProfiles.size());
 }
 
 }  // namespace vis
