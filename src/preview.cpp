@@ -7,13 +7,16 @@
 
 #include "vision.h"
 
+#include "capture.h"
 #include "controller.h"
 #include "detect_common.h"
 #include "iplframe.h"
 #include "settings.h"
 
 #include <algorithm>
+#include <format>
 #include <opencv2/core.hpp>
+#include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 
 #define NOMINMAX      // keep std::min/std::max usable
@@ -65,13 +68,14 @@ bool blit_to_hwnd(HWND hwnd, const cv::Mat& work, int cw, int ch, int rw, int rh
 // (anisotropic: X scale spaces the horizontal ticks, Y the vertical). Length tiers
 // 1.0 mm > 0.5 mm > 0.25 mm. No-op until the controller scale read has landed. Shared
 // by the down (down_cam_scale) and up (up_cam_scale) previews.
-void draw_mm_ticks(cv::Mat& work, int cw, int ch, const CamScale& sc, int thickness) {
+void draw_mm_ticks(cv::Mat& work, int cw, int ch, const CamScale& sc, int thickness,
+                   int cxOverride = -1, int cyOverride = -1) {
     if (!sc.valid || sc.xMmPerPx <= 0.0 || sc.yMmPerPx <= 0.0) {
         return;
     }
     const cv::Scalar red(0, 0, 255);
-    const int cxp = cw / 2;
-    const int cyp = ch / 2;
+    const int cxp = (cxOverride >= 0) ? cxOverride : cw / 2;
+    const int cyp = (cyOverride >= 0) ? cyOverride : ch / 2;
     const double pxQX = 0.25 / sc.xMmPerPx;  // px per 0.25 mm, horizontal
     const double pxQY = 0.25 / sc.yMmPerPx;  // px per 0.25 mm, vertical
     const auto tick_len = [](int n) { return (n % 4 == 0) ? 9 : (n % 2 == 0) ? 6
@@ -317,13 +321,31 @@ bool render_comp_preview(const void* frame, void* hwndV, const CompResult& cr) {
         const double cropTop = ry - ch / 2.0;
 
         const int RT = 1;
-        // Reference crosshair (red) at the crop center = the nozzle center. The gap to
-        // the green part center is the placement offset the host corrects.
+        // Reference crosshair (red) drawn at the CALIBRATED NOZZLE POSITION in the
+        // camera frame, not raw frame center. The host stores this offset on the
+        // controller (keys 38/39 = Nozzle 1 mm offset from the camera reference, the
+        // same value it subtracts from our reported offset to derive the placement
+        // correction); we read it in controller.cpp. Without this shift the red
+        // cross sat at frame center while the actual nozzle hangs ~5.6 px away,
+        // making the green box LOOK like it lock onto the wrong place. With it,
+        // green-on-red after the servo converges means "part centered on nozzle"
+        // -- the real diagnostic. Falls back to frame center when the controller
+        // read hasn't landed or the scale is missing.
+        const auto upSc = up_cam_scale();
+        const auto noz = nozzle1_up_offset();
+        double nozDxPx = 0.0;
+        double nozDyPx = 0.0;
+        if (noz.valid && upSc.valid && upSc.xMmPerPx > 0 && upSc.yMmPerPx > 0) {
+            nozDxPx = noz.xMm / upSc.xMmPerPx;
+            nozDyPx = noz.yMm / upSc.yMmPerPx;
+        }
+        const int crossX = std::clamp(static_cast<int>(std::lround(cw / 2.0 + nozDxPx)), 0, cw - 1);
+        const int crossY = std::clamp(static_cast<int>(std::lround(ch / 2.0 + nozDyPx)), 0, ch - 1);
         const cv::Scalar red(0, 0, 255);
-        cv::line(work, cv::Point(cw / 2, 0), cv::Point(cw / 2, ch), red, RT, cv::LINE_AA);
-        cv::line(work, cv::Point(0, ch / 2), cv::Point(cw, ch / 2), red, RT, cv::LINE_AA);
+        cv::line(work, cv::Point(crossX, 0), cv::Point(crossX, ch), red, RT, cv::LINE_AA);
+        cv::line(work, cv::Point(0, crossY), cv::Point(cw, crossY), red, RT, cv::LINE_AA);
         // 0.25 mm tick marks along the crosshair, from the UP-camera px/mm scale.
-        draw_mm_ticks(work, cw, ch, up_cam_scale(), RT);
+        draw_mm_ticks(work, cw, ch, upSc, RT, crossX, crossY);
 
         // Detected part (green = locked): oriented body box + center cross + a direction
         // arrow poking past one edge so the rotation reads at a glance (OpenPnP's
@@ -334,30 +356,60 @@ bool render_comp_preview(const void* frame, void* hwndV, const CompResult& cr) {
         // way) but tilts the box the wrong way at intermediate angles. We negate only the
         // OVERLAY; cr.angle that drives placement is untouched.
         if (cr.found) {
+            // Sub-pixel-aware drawing. cv::line/arrowedLine accept a `shift` arg --
+            // every point coord is interpreted as `coord / (1 << shift)`. With
+            // shift=4 the effective resolution is 1/16 px, killing the
+            // pixel-snap shimmer when the detection wiggles sub-pixel across
+            // frames. cv::drawMarker doesn't take shift, so the center cross
+            // is two cv::line calls instead.
+            constexpr int kShift = 4;
+            constexpr double kSub = static_cast<double>(1 << kShift);
+            const auto sp = [&](double x, double y) {
+                return cv::Point(cvRound(x * kSub), cvRound(y * kSub));
+            };
             const cv::Scalar green(0, 255, 0);
-            const auto u = static_cast<float>(cr.cx - cropLeft);
-            const auto v = static_cast<float>(cr.cy - cropTop);
-            const cv::RotatedRect rr(cv::Point2f(u, v),
+            const double u = cr.cx - cropLeft;
+            const double v = cr.cy - cropTop;
+            const cv::RotatedRect rr(cv::Point2f(static_cast<float>(u), static_cast<float>(v)),
                                      cv::Size2f(static_cast<float>(cr.w), static_cast<float>(cr.h)),
                                      static_cast<float>(-cr.angle));
             std::array<cv::Point2f, 4> p{};
             rr.points(p.data());
             for (int i = 0; i < 4; ++i) {
-                cv::line(work, p[i], p[(i + 1) % 4], green, RT, cv::LINE_AA);
+                cv::line(work, sp(p[i].x, p[i].y), sp(p[(i + 1) % 4].x, p[(i + 1) % 4].y),
+                         green, RT, cv::LINE_AA, kShift);
             }
             // Arrow along the height axis (box angle - 90 deg), 1.3x half-height out.
             const double ma = (-cr.angle - 90.0) * CV_PI / 180.0;
-            const cv::Point center(cvRound(u), cvRound(v));
-            const cv::Point tip(cvRound(u + 1.3 * cr.h / 2.0 * std::cos(ma)),
-                                cvRound(v + 1.3 * cr.h / 2.0 * std::sin(ma)));
-            cv::arrowedLine(work, center, tip, green, RT, cv::LINE_AA, 0, 0.3);
-            cv::drawMarker(work, center, green, cv::MARKER_CROSS, 10, RT, cv::LINE_AA);
+            const double tipX = u + 1.3 * cr.h / 2.0 * std::cos(ma);
+            const double tipY = v + 1.3 * cr.h / 2.0 * std::sin(ma);
+            cv::arrowedLine(work, sp(u, v), sp(tipX, tipY), green, RT, cv::LINE_AA, kShift, 0.3);
+            // Center cross as two sub-pixel lines (drawMarker takes no shift).
+            constexpr double kCrossHalf = 5.0;
+            cv::line(work, sp(u - kCrossHalf, v), sp(u + kCrossHalf, v), green, RT, cv::LINE_AA, kShift);
+            cv::line(work, sp(u, v - kCrossHalf), sp(u, v + kCrossHalf), green, RT, cv::LINE_AA, kShift);
         }
 
         draw_settings_hint(work, cw);  // "Ctrl+Alt+M: settings" hint, top-right
 
         if (!work.isContinuous()) {
             work = work.clone();
+        }
+
+        // Save the rendered overlay (red cross + green box + ticks + arrow) as a
+        // PNG when capture is armed. Gated by `frames` like the raw-frame saves;
+        // gives a per-read visual record of green-on-red alignment for offline
+        // calibration review (e.g. confirming that a 0.1 mm cx offset between
+        // green and red is consistent across all parts -> nozzle calibration
+        // issue, not detector wobble).
+        if (cap::armed() && cap::frames_enabled()) {
+            try {
+                const int idx = cap::next_index();
+                if (idx >= 0) {
+                    cv::imwrite(std::format("{}\\overlay_{:04d}.png", cap::dir(), idx), work);
+                }
+            } catch (...) {  // NOLINT(bugprone-empty-catch)
+            }
         }
     } catch (...) {
         return false;

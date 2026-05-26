@@ -152,6 +152,36 @@ Some behavior comes from the app itself, not this dialog:
 - **ImageTemplate** uses the template image you teach in the UI.
 - **Round** uses the app's **Range** value as the search radius.
 
+#### Up-vision **视觉阈值** (CompThre, per-stack) — the one knob that matters
+
+The host's per-feeder-stack 视觉阈值 column in the ParamEdit dialog (one value
+per slot for Left / Back / IC stacks) is what the up-vision component detector
+actually tunes against. It's a **percentage (0–100) of the ROI's max brightness**,
+not an absolute gray level: e.g. `60` binarises at 60% of the brightest pixel.
+The detector runs two paths every read (symmetry on the body edges, plus a
+union-of-near-center-contours fallback for parts where the body is invisible
+between bright features); CompThre tunes which features the fallback catches,
+and a built-in 2× area rule keeps the cleaner path winning when both find
+similar sizes.
+
+A starting guide — set the value on each feeder slot via ParamEdit, **then
+save the placement CSV** (the host's CSV file carries the per-slot 视觉阈值
+values; loading a CSV overwrites them, so any change has to be re-saved):
+
+| Part class                                              | CompThre  | Why                                                                          |
+|---------------------------------------------------------|-----------|------------------------------------------------------------------------------|
+| **0402 / 0603 / 0805 chip caps & resistors**            | **50**    | Symmetry catches the body cleanly; value isn't critical.                     |
+| **Self-emitting LEDs (WS28xx-style, halo around body)** | **60–70** | Higher value keeps the fallback's catch small (body core only) so symmetry's clean body-edge result wins and stays sub-pixel stable. |
+| **SOT-23-3 / SOT-23-6 leaded ICs**                      | **25–30** | Low value catches every dim pin tip; fallback's union spans the full body bounding box. |
+| **SOIC / QFN / larger leaded ICs**                      | **30–40** | Pin tips plus partial body visibility.                                       |
+| **Tantalum caps / electrolytics (bright top)**          | **45–55** | Body is bright; symmetry handles cleanly.                                    |
+| **Shielded inductors (reflective sides)**               | **40–60** | Try mid-range; lower if the body reads dim, higher if the sides glare.       |
+| **Default when unsure**                                 | **50**    | Sensible middle ground.                                                       |
+
+The detector itself has **no per-part-class branching** — there's a single
+generic algorithm and the operator's CompThre value is the only tuning knob.
+Values **0–9 are reserved** for future "special profile" overrides.
+
 ### Code-level
 
 Built-in defaults / constants live near the top of the per-mode files under `src/`

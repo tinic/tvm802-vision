@@ -40,9 +40,17 @@ cmake -S . -B build-lint -DBUILD_TESTS=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON >/d
 result $?
 
 gate "clang-tidy (portable, Windows-free TUs: src/detect_*.cpp + settings.cpp)"
-clang-tidy -p build-lint src/detect_common.cpp src/detect_circle.cpp \
+# Parallel across cores via xargs -P. --header-filter restricts warning
+# emission to our own src/ so the OpenCV system header tree is parsed but
+# not analysed. xargs returns non-zero if any child fails, propagated to
+# `result` -- one TU's errors still fail the gate. Several-x faster than
+# the per-file serial run.
+N=$(nproc 2>/dev/null || echo 4)
+printf '%s\n' src/detect_common.cpp src/detect_circle.cpp \
     src/detect_contour.cpp src/detect_template.cpp src/detect_symmetry.cpp \
-    src/detect_component.cpp src/settings.cpp src/thread_pool.cpp
+    src/detect_component.cpp src/settings.cpp src/thread_pool.cpp |
+    xargs -P "$N" -n 1 clang-tidy -p build-lint --quiet \
+        --header-filter='.*/src/.*'
 result $?
 
 # Local-only: the OpenCV-free Windows TUs (capture/controller/settings_ui) need

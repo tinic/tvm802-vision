@@ -39,6 +39,23 @@ bool comp_enabled() {
 }
 
 int next_index() {
+    // Part-boundary detection (for offline smoke-test slicing). A new placement
+    // cycle is hundreds of ms of motion between CheckComp reads, so a > 1 s gap
+    // is a reliable "new part starts here" signal. Frame numbering stays
+    // monotonic across the session; the boundary is recorded in compare.log
+    // as a line "# PART <p> starts at frame <f>" so a curator can slice the
+    // saved PNGs into per-part buckets retrospectively.
+    static std::atomic<uint64_t> g_lastMs{0};
+    static std::atomic<int> g_partCount{0};
+    const uint64_t nowMs = ::GetTickCount64();
+    const uint64_t lastMs = g_lastMs.exchange(nowMs, std::memory_order_relaxed);
+    const bool newPart = (lastMs == 0) || (nowMs > lastMs && nowMs - lastMs > 1000);
+    if (newPart) {
+        const int p = g_partCount.fetch_add(1, std::memory_order_relaxed) + 1;
+        const int f = g_counter.load(std::memory_order_relaxed);
+        log_line(std::format("# PART {} starts at frame {}", p, f));
+    }
+
     const int idx = g_counter.fetch_add(1, std::memory_order_relaxed);
     CreateDirectoryA(kDir, nullptr);  // no-op if present
     return idx;

@@ -28,12 +28,12 @@ namespace {
 using detail::as_valid_ipl;
 
 struct CompParams {
-    double meanLo = 3.0, meanHi = 252.0;  // dropped (black) / blown (white) frame
+    double meanLo = 0.5, meanHi = 254.5;  // catches truly dropped/blown frames only
     int searchFallbackPx = 110;           // center-search radius when the host gives none
     int roiPad = 28;                      // ROI margin beyond search + expected size
-    int gaussKernel = 5;                  // anti-noise pre-blur (native cvSmooth 5x5)
+    int gaussKernel = 3;                  // light pre-blur (5x5 smears 0402 short axis)
     int defaultThreshold = 50;            // native Comp Threshold default (0x32) for fallback
-    int minPartPx = 12;                   // ignore features/contours smaller than this
+    int minPartPx = 6;                    // 0402 short axis is ~20 px on the up-cam
     // Orientation search: a rectangle repeats every 90 deg, so search (-45, 45].
     double angleSpanDeg = 45.0;
     double angleCoarseStepDeg = 3.0;
@@ -263,8 +263,21 @@ void disambiguate_with_prior(double& w, double& h, double& angle,
 CompResult minarea_fallback(const cv::Mat& g, const cv::Rect& crop,
                             double refXroi, double refYroi, int threshold) {
     CompResult r;
+    // CompThre as PERCENTAGE of the ROI's max brightness (0-100). The operator
+    // is the only person who knows how their part presents on the up-cam
+    // (chip cap with dim body between bright terminals, SOT pins, LED with
+    // halo, etc.); CompThre is their knob. Lower = more permissive (catches
+    // dim features); higher = stricter (rejects halos / glare). Default 30
+    // when unset.
+    double maxv = 0.0;
+    cv::minMaxLoc(g, nullptr, &maxv);
+    if (maxv < 8.0) {
+        return r;
+    }
+    const double pct = (threshold > 0 && threshold <= 100) ? threshold : 30.0;
+    const double thrUse = (pct / 100.0) * maxv;
     cv::Mat bin;
-    cv::threshold(g, bin, static_cast<double>(threshold), 255.0, cv::THRESH_BINARY);
+    cv::threshold(g, bin, thrUse, 255.0, cv::THRESH_BINARY);
     const cv::Mat k = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
     cv::morphologyEx(bin, bin, cv::MORPH_OPEN, k);
     cv::morphologyEx(bin, bin, cv::MORPH_CLOSE, k);
@@ -275,43 +288,45 @@ CompResult minarea_fallback(const cv::Mat& g, const cv::Rect& crop,
         return r;
     }
 
-    // Prefer the largest contour whose centroid is near the reference (the part sits
-    // over the nozzle, ~centered); reject specks.
-    int best = -1;
-    double bestScore = -1.0;
-    const auto minArea = static_cast<double>(kComp.minPartPx * kComp.minPartPx);
-    for (size_t i = 0; i < contours.size(); ++i) {
-        const double area = cv::contourArea(contours[i]);
-        if (area < minArea) {
+    // Union of every near-reference contour, fit a minAreaRect to the merged
+    // point cloud. Handles parts where the body is INVISIBLE between
+    // distinct bright features (a leaded IC like SOT-23 shows only its pin
+    // tips against a dark body; a chip cap shows only the two metallic
+    // terminals). Smaller per-contour minArea than kComp.minPartPx^2 so
+    // individual pins / terminals (which are tiny) still pass.
+    const auto dxLim = static_cast<double>(kComp.searchFallbackPx);
+    const double minBlobArea = std::max(4.0,
+                                        0.25 * static_cast<double>(kComp.minPartPx * kComp.minPartPx));
+    std::vector<cv::Point> allPts;
+    allPts.reserve(2048);
+    double totalArea = 0.0;
+    for (const auto& c : contours) {
+        const double area = cv::contourArea(c);
+        if (area < minBlobArea) {
             continue;
         }
-        const cv::Moments m = cv::moments(contours[i]);
+        const cv::Moments m = cv::moments(c);
         if (m.m00 <= 0.0) {
             continue;
         }
-        const double cxr = m.m10 / m.m00;
-        const double cyr = m.m01 / m.m00;
-        const double dx = cxr - refXroi;
-        const double dy = cyr - refYroi;
-        const double score = area / (1.0 + std::sqrt(dx * dx + dy * dy));
-        if (score > bestScore) {
-            bestScore = score;
-            best = static_cast<int>(i);
+        const double dx = m.m10 / m.m00 - refXroi;
+        const double dy = m.m01 / m.m00 - refYroi;
+        if (dx * dx + dy * dy > dxLim * dxLim) {
+            continue;
         }
+        allPts.insert(allPts.end(), c.begin(), c.end());
+        totalArea += area;
     }
-    if (best < 0) {
+    if (allPts.size() < 6) {
         return r;
     }
 
-    const cv::RotatedRect rr = cv::minAreaRect(contours[static_cast<size_t>(best)]);
+    const cv::RotatedRect rr = cv::minAreaRect(allPts);
     double w = rr.size.width;
     double h = rr.size.height;
     double angle = rr.angle;
     const double boxArea = w * h;
-    const double fill = (boxArea > 1.0) ? cv::contourArea(contours[static_cast<size_t>(best)]) / boxArea : 0.0;
-    if (fill < kComp.minFillFallback) {
-        return r;
-    }
+    const double fill = (boxArea > 1.0) ? totalArea / boxArea : 0.0;
 
     normalize_pose(w, h, angle);
     r.found = true;
@@ -320,7 +335,7 @@ CompResult minarea_fallback(const cv::Mat& g, const cv::Rect& crop,
     r.w = w;
     r.h = h;
     r.angle = angle;
-    r.quality = fill;  // rectangularity as the fallback's confidence
+    r.quality = fill;
     r.method = CompResult::Method::MinAreaRect;
     return r;
 }
@@ -475,17 +490,47 @@ CompResult detect_component(const void* frame,
             r.method = CompResult::Method::Symmetry;
             (void)expectedAngleDeg;  // reserved: narrow the angle search once data exists
             if (!plausible_part(r.cx, r.cy, r.w, r.h, rxF, ryF, sr, crop, cfg.radiusMaxPx)) {
-                r.found = false;  // stray (off-nozzle / too big) -> drop, try fallback
-            } else if (r.quality >= minSym) {
-                return r;
+                r.found = false;
             }
+            (void)minSym;
         }
 
-        // --- Fallback: thresholded-silhouette minAreaRect ---
+        // Always also run the union-of-contours fallback. CompThre (the
+        // operator's per-stack 视觉阈值, % of ROI max) tunes which features
+        // the binarization catches; the LARGER plausible-pose result wins.
+        // The two paths are complementary -- symmetry locks cleanly on
+        // single-bright-body parts (LEDs); union spans multi-feature parts
+        // (chip caps, SOT pin layouts) that symmetry would only catch
+        // a sub-feature of. No part-class branching in the code; the
+        // operator's CompThre value steers which path's result dominates.
         const CompResult fb = minarea_fallback(g, crop, rxF - crop.x, ryF - crop.y, thr);
-        if (fb.found && plausible_part(fb.cx, fb.cy, fb.w, fb.h, rxF, ryF, sr, crop, cfg.radiusMaxPx)) {
+        const bool symOk = r.found;
+        const bool fbOk = fb.found &&
+                          plausible_part(fb.cx, fb.cy, fb.w, fb.h, rxF, ryF, sr, crop, cfg.radiusMaxPx);
+        if (symOk && fbOk) {
+            const double symArea = r.w * r.h;
+            const double fbArea = fb.w * fb.h;
+            // Fallback only wins when meaningfully larger -- a 2x area threshold
+            // distinguishes "symmetry caught a sub-feature of a multi-feature
+            // part" (SOT-23 single pin vs union of all pins) from "both paths
+            // see the same body" (chip cap), avoiding frame-to-frame flip
+            // wobble when sizes are similar.
+            if (fbArea > 2.0 * symArea) {
+                CompResult out = fb;
+                out.cy += cyCorrection;
+                out.imgW = r.imgW;
+                out.imgH = r.imgH;
+                out.imgOrigin = r.imgOrigin;
+                out.headerOk = r.headerOk;
+                out.frameHash = r.frameHash;
+                disambiguate_with_prior(out.w, out.h, out.angle, expectedWpx, expectedHpx);
+                return out;
+            }
+            return r;
+        }
+        if (fbOk) {
             CompResult out = fb;
-            out.cy += cyCorrection;  // field-row -> full-frame y
+            out.cy += cyCorrection;
             out.imgW = r.imgW;
             out.imgH = r.imgH;
             out.imgOrigin = r.imgOrigin;
@@ -494,8 +539,6 @@ CompResult detect_component(const void* frame,
             disambiguate_with_prior(out.w, out.h, out.angle, expectedWpx, expectedHpx);
             return out;
         }
-        // Neither path confident: return the low-confidence symmetry result if we had
-        // one (better than nothing for offline inspection), else not-found.
         return r;
     } catch (...) {
         r.found = false;

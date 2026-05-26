@@ -32,9 +32,12 @@ namespace {
 constexpr const char* kCtrlIp = "192.168.0.8";  // default controller IP (fallback)
 constexpr std::uint16_t kCtrlPort = 701;        // controller port
 constexpr std::uint32_t kKeyUpX = 20, kKeyUpY = 21, kKeyDownX = 34, kKeyDownY = 35;
+// Per-nozzle up-camera offset (mm x1000). See controller.h::NozzleOffset.
+constexpr std::uint32_t kKeyN1X = 38, kKeyN1Y = 39, kKeyN2X = 40, kKeyN2Y = 41;
 
 std::mutex g_mtx;
 CamScale g_up, g_down;
+NozzleOffset g_n1, g_n2;
 std::once_flag g_once;
 bool g_wsaUp = false;
 
@@ -187,25 +190,39 @@ void fetch() {
         std::int32_t uy = 0;
         std::int32_t dx = 0;
         std::int32_t dy = 0;
+        std::int32_t n1x = 0;
+        std::int32_t n1y = 0;
+        std::int32_t n2x = 0;
+        std::int32_t n2y = 0;
         bool ok = false;
+        bool nozOk = false;
         if (connected) {
             consume_banner(s);
             ok = read_param(s, kKeyUpX, ux) && read_param(s, kKeyUpY, uy) &&
                  read_param(s, kKeyDownX, dx) && read_param(s, kKeyDownY, dy);
+            // Nozzle offsets are best-effort: a controller without those keys
+            // shouldn't fail the whole read.
+            nozOk = read_param(s, kKeyN1X, n1x) && read_param(s, kKeyN1Y, n1y) &&
+                    read_param(s, kKeyN2X, n2x) && read_param(s, kKeyN2Y, n2y);
             closesocket(s);
         }
         if (cap::armed()) {  // diagnostic: confirm discovery/endpoint/values when armed
             std::array<char, INET_ADDRSTRLEN> ips{};
             inet_ntop(AF_INET, &ep.sin_addr, ips.data(), ips.size());
             cap::log_line(std::format(
-                "controller: discovered={} ep={}:{} connect={} read={} down=({},{}) up=({},{})",
+                "controller: discovered={} ep={}:{} connect={} read={} down=({},{}) up=({},{}) "
+                "nozOk={} n1=({},{}) n2=({},{})",
                 discovered ? 1 : 0, ips.data(), ntohs(ep.sin_port), connected ? 1 : 0, ok ? 1 : 0,
-                dx, dy, ux, uy));
+                dx, dy, ux, uy, nozOk ? 1 : 0, n1x, n1y, n2x, n2y));
         }
         if (ok) {
             std::lock_guard<std::mutex> const lk(g_mtx);
             g_up = {.xMmPerPx = ux / 10000.0, .yMmPerPx = uy / 10000.0, .valid = ux > 0 && uy > 0};
             g_down = {.xMmPerPx = dx / 10000.0, .yMmPerPx = dy / 10000.0, .valid = dx > 0 && dy > 0};
+            if (nozOk) {
+                g_n1 = {.xMm = n1x / 1000.0, .yMm = n1y / 1000.0, .valid = true};
+                g_n2 = {.xMm = n2x / 1000.0, .yMm = n2y / 1000.0, .valid = true};
+            }
             return;
         }
         std::this_thread::sleep_for(std::chrono::seconds(2));
@@ -238,6 +255,18 @@ CamScale up_cam_scale() {
     ensure();
     std::lock_guard<std::mutex> const lk(g_mtx);
     return g_up;
+}
+
+NozzleOffset nozzle1_up_offset() {
+    ensure();
+    std::lock_guard<std::mutex> const lk(g_mtx);
+    return g_n1;
+}
+
+NozzleOffset nozzle2_up_offset() {
+    ensure();
+    std::lock_guard<std::mutex> const lk(g_mtx);
+    return g_n2;
 }
 
 }  // namespace vis

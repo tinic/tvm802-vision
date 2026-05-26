@@ -18,4 +18,19 @@ struct CamScale {
 CamScale down_cam_scale();
 CamScale up_cam_scale();
 
+// Per-nozzle calibrated offset between the up-camera reference and the actual
+// nozzle position, in mm. The host uses these as a placement-correction
+// subtrahend (placement_correction = our_offset_mm - nozzle_offset_mm), so they
+// encode where the nozzle ACTUALLY appears in the up-cam frame relative to its
+// nominal reference. Stored on the controller as keys 38/39 (nozzle 1) and
+// 40/41 (nozzle 2), x1000 in millimeters. Fetched alongside the camera scales;
+// `valid=false` until a controller read lands.
+struct NozzleOffset {
+    double xMm = 0.0;
+    double yMm = 0.0;
+    bool valid = false;
+};
+NozzleOffset nozzle1_up_offset();
+NozzleOffset nozzle2_up_offset();
+
 }  // namespace vis

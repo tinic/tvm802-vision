@@ -19,14 +19,17 @@
 #include "settings.h"
 #include "settings_ui.h"
 
+#include <algorithm>
 #include <array>
 #include <cstring>
 #include <chrono>
+#include <cstdint>
 #include <format>
 #include <functional>
 #include <limits>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 
 #if defined(_MSC_VER) && !defined(__clang__)
@@ -45,6 +48,41 @@ double g_detMs = 0.0;              // last our-detector duration
 double g_renderMs = 0.0;           // last preview-render duration
 unsigned int g_lastFrameHash = 0;  // freshness guard: hash of the last frame served
 
+// Unconditional entry tracer for every MVision export -- writes timestamped
+// "#trace,<name>,<args>" lines to compare.log so an offline scan can RECONSTRUCT
+// the host's full call sequence regardless of which gate our wrapper later
+// passes through (or which forwarder is otherwise silent). Only fires when the
+// general capture sentinel is armed (zero cost otherwise). Never throws across
+// the C ABI. Pair with `trace_save_frame` to grab the corresponding IplImage on
+// the same call when frames are armed.
+void trace_call(std::string_view name, std::string_view args = "") {
+    if (!cap::armed()) {
+        return;
+    }
+    try {
+        cap::log_line(std::format("#trace,{},t={},{}", name, ::GetTickCount64(), args));
+    } catch (...) {  // NOLINT(bugprone-empty-catch)
+    }
+}
+// Save a PNG of the frame `f` next to the trace line, using a name-tagged
+// filename so a forwarded export (e.g. CheckMark / CheckTemplate / CheckNozzle
+// running through to the original) still leaves a frame on disk. No-op when
+// either capture or frame-bytes sentinel is absent. Best-effort -- a save
+// failure is logged but never crosses the C ABI.
+void trace_save_frame(const void* f, std::string_view name) {
+    if (!cap::armed() || !cap::frames_enabled() || f == nullptr) {
+        return;
+    }
+    try {
+        const int idx = cap::next_index();
+        if (idx < 0) {
+            return;
+        }
+        vis::save_frame(f, std::format("{}\\{}_{:04d}.png", cap::dir(), name, idx).c_str());
+    } catch (...) {  // NOLINT(bugprone-empty-catch)
+    }
+}
+
 // ImageTemplate cache. The host pushes its single mark template to CheckTemplate
 // occasionally and passes null on most frames, so we hold the latest one and
 // match it across the null frames. `scale` is the locked match scale; it is reset
@@ -58,6 +96,54 @@ struct Template {
     double scale = 0.0;  // locked match scale (0 = re-sweep next detect)
 };
 Template g_tmpl;
+
+// Temporal median filter for the W/H reported by detect_component. The host's
+// up-vision iterative servo INTENTIONALLY moves the part between consecutive
+// CheckComp reads (each correction nudges the nozzle); cx/cy/angle should
+// track that motion truthfully, but W/H is the part's intrinsic size and the
+// host's size-check (vision-bit in 检料方式) wants a single stable measurement
+// across the servo's read sequence. Per-frame mask jitter (different terminals
+// crossing threshold, different morph-close bridging) wobbles W/H by ~5-15 px
+// even when the part itself is stationary. A windowed median over the last
+// kCompWHWindow reads collapses that to ~1 px. Buffer resets on >1 s inter-
+// call gap, which is the "new part begins" signal (placements take seconds).
+constexpr size_t kCompWHWindow = 7;
+struct CompWHSmoother {
+    std::array<double, kCompWHWindow> wBuf{};
+    std::array<double, kCompWHWindow> hBuf{};
+    size_t n = 0;
+    size_t head = 0;
+    uint64_t lastMs = 0;
+    void push(double w, double h, uint64_t nowMs) {
+        if (lastMs != 0 && nowMs > lastMs && nowMs - lastMs > 1500) {
+            n = 0;
+            head = 0;
+        }
+        lastMs = nowMs;
+        wBuf[head] = w;
+        hBuf[head] = h;
+        head = (head + 1) % kCompWHWindow;
+        if (n < kCompWHWindow) {
+            ++n;
+        }
+    }
+    void median(double* outW, double* outH) const {
+        if (n == 0) {
+            return;
+        }
+        std::array<double, kCompWHWindow> ws{};
+        std::array<double, kCompWHWindow> hs{};
+        for (size_t i = 0; i < n; ++i) {
+            ws[i] = wBuf[i];
+            hs[i] = hBuf[i];
+        }
+        std::sort(ws.begin(), ws.begin() + n);
+        std::sort(hs.begin(), hs.begin() + n);
+        *outW = ws[n / 2];
+        *outH = hs[n / 2];
+    }
+};
+CompWHSmoother g_compWH;
 unsigned int tmpl_hash(const unsigned char* p, size_t n) {
     unsigned int h = 2166136261u;
     for (size_t i = 0; i < n; i += 7) {
@@ -466,6 +552,16 @@ void* __stdcall QueryFrame(void* cam, int timeout) {
 // BOTH the sentinel present AND kCompDrive=true (compile-time) does our pose drive
 // placement via the comp-mode GetOffset packing, with the original called for preview.
 int __stdcall CheckComp(void* f, int hwnd, int w, int h) {
+    // Unconditional entry trace + frame snapshot, BEFORE any gate. Even when our
+    // detector bypasses (sentinel absent or "Component" checkbox off), we still
+    // get a log line and PNG, so an offline scan can prove the host DID call
+    // us. Pair with the detailed log line in maybe_log_comp() below.
+    trace_call("CheckComp", std::format("w={},h={},comp={},methodOn={},drive={},thr={},expW={:.3f},expH={:.3f},expA={:.3f}",
+                                        w, h, cap::comp_enabled() ? 1 : 0,
+                                        vis::method_enabled(vis::METHOD_COMP) ? 1 : 0,
+                                        kCompDrive ? 1 : 0, g_compThreshold,
+                                        g_compExpW, g_compExpH, g_compExpA));
+    trace_save_frame(f, "CheckCompEntry");
     // Sentinel gate: inert unless the operator opts in. A released DLL carries the
     // prototype but does nothing up-vision until C:\mvision_capture\comp is created.
     // The "Component" UI checkbox is an additional off switch (default on).
@@ -493,9 +589,16 @@ int __stdcall CheckComp(void* f, int hwnd, int w, int h) {
     up_reference_point(f, &refX, &refY);
 
     auto t0 = clk::now();
-    const vis::CompResult cr = vis::detect_component(f, expWpx, expHpx, g_compExpA,
-                                                     g_compThreshold, refX, refY, 0);
+    vis::CompResult cr = vis::detect_component(f, expWpx, expHpx, g_compExpA,
+                                               g_compThreshold, refX, refY, 0);
     g_detMs = ms_since(t0);
+    // Temporal-median smoothing of W/H ONLY (the host's size-check wants a
+    // single stable measurement across the servo's read sequence; cx/cy/angle
+    // are kept per-frame so the host's iterative correction sees current pose).
+    if (cr.found) {
+        g_compWH.push(cr.w, cr.h, ::GetTickCount64());
+        g_compWH.median(&cr.w, &cr.h);
+    }
 
     // `if constexpr` so the shadow-default build (kCompDrive=false) doesn't trip MSVC
     // C4127 (constant condition) under /WX; the drive branch is discarded but still
@@ -532,14 +635,20 @@ int __stdcall CheckComp(void* f, int hwnd, int w, int h) {
 // vendor export -- the host never calls it -- but we keep the forwarder so the
 // export table matches the original ABI.)
 int __stdcall CheckNozzle(void* f, int hwnd, int w, int h) {
+    trace_call("CheckNozzle", std::format("w={},h={}", w, h));
+    trace_save_frame(f, "CheckNozzle");
     g_resultSrc = ResultSrc::Original;
     return mv::orig::CheckNozzle(f, hwnd, w, h);
 }
 int __stdcall DownCheckComp(void* f, int hwnd, int w, int h, int p) {
+    trace_call("DownCheckComp", std::format("w={},h={},p={}", w, h, p));
+    trace_save_frame(f, "DownCheckComp");
     g_resultSrc = ResultSrc::Original;
     return mv::orig::DownCheckComp(f, hwnd, w, h, p);
 }
 void* __stdcall DownShow(void* f) {
+    trace_call("DownShow");
+    trace_save_frame(f, "DownShow");
     g_resultSrc = ResultSrc::Original;
     return mv::orig::DownShow(f);
 }
@@ -549,6 +658,7 @@ void* __stdcall DownShow(void* f) {
 // CheckMark2). Other algo values (-1 preview-only, legacy shape modes) pass
 // through. r = strength (unused by the Round detector).
 int __stdcall CheckMark(void* f, int hwnd, int w, int h, int algo, int r) {
+    trace_call("CheckMark", std::format("w={},h={},algo={},r={}", w, h, algo, r));
     if (algo != 0 || !vis::method_enabled(vis::METHOD_ROUND)) {
         g_resultSrc = ResultSrc::Original;  // not Round, or operator disabled our Round detector
         return mv::orig::CheckMark(f, hwnd, w, h, algo, r);
@@ -569,6 +679,7 @@ int __stdcall CheckMark(void* f, int hwnd, int w, int h, int algo, int r) {
 // invoked only as a preview fallback (run_mark_check). CheckMark2 args:
 // algo = template size px (from the 1.2mm setting), r = strength.
 int __stdcall CheckMark2(void* f, int hwnd, int w, int h, int algo, int r) {
+    trace_call("CheckMark2", std::format("w={},h={},algo={},r={}", w, h, algo, r));
     if (!vis::method_enabled(vis::METHOD_CIRCULAR)) {
         g_resultSrc = ResultSrc::Original;  // operator disabled our Circular detector
         return mv::orig::CheckMark2(f, hwnd, w, h, algo, r);
@@ -577,6 +688,8 @@ int __stdcall CheckMark2(void* f, int hwnd, int w, int h, int algo, int r) {
 }
 
 int __stdcall GetTemplate(void* f, unsigned char* out, int sz, double p) {
+    trace_call("GetTemplate", std::format("sz={},p={:.3f}", sz, p));
+    trace_save_frame(f, "GetTemplate");
     return mv::orig::GetTemplate(f, out, sz, p);
 }
 
@@ -586,6 +699,7 @@ int __stdcall GetTemplate(void* f, unsigned char* out, int sz, double p) {
 // dispatch as CheckMark2. Falls back to the original render only if our preview
 // render fails.
 int __stdcall CheckTemplate(void* f, int hwnd, int w, int h, unsigned char* t, int sz, double th, int m) {
+    trace_call("CheckTemplate", std::format("w={},h={},sz={},th={:.3f},m={}", w, h, sz, th, m));
     cache_template(t, sz);  // store the latest template (no-op on null/unchanged)
     if (!vis::method_enabled(vis::METHOD_TEMPLATE)) {
         g_resultSrc = ResultSrc::Original;  // operator disabled our ImageTemplate detector
@@ -600,32 +714,44 @@ int __stdcall CheckTemplate(void* f, int hwnd, int w, int h, unsigned char* t, i
             return mr; }, [&] { mv::orig::CheckTemplate(f, hwnd, w, h, t, sz, th, m); });
 }
 int __stdcall TemplateVision(void* f, int hwnd, int w, int h, unsigned char* t, int sz, double th, int m) {
+    trace_call("TemplateVision", std::format("w={},h={},sz={},th={:.3f},m={}", w, h, sz, th, m));
+    trace_save_frame(f, "TemplateVision");
     return mv::orig::TemplateVision(f, hwnd, w, h, t, sz, th, m);
 }
 
 int __stdcall OpenPerspectiveTransform(void) {
+    trace_call("OpenPerspectiveTransform");
     return mv::orig::OpenPerspectiveTransform();
 }
 int __stdcall ClosePerspectiveTransform(void) {
+    trace_call("ClosePerspectiveTransform");
     return mv::orig::ClosePerspectiveTransform();
 }
 int __stdcall SetPerspectiveMatrix(double* m9) {
+    trace_call("SetPerspectiveMatrix");
     return mv::orig::SetPerspectiveMatrix(m9);
 }
 void* __stdcall GetLowResTransformParam(void* f, int hwnd, int w, int h, int a, int b, int* oa, double* ob, double* om) {
+    trace_call("GetLowResTransformParam", std::format("w={},h={},a={},b={}", w, h, a, b));
+    trace_save_frame(f, "GetLowResTransformParam");
     return mv::orig::GetLowResTransformParam(f, hwnd, w, h, a, b, oa, ob, om);
 }
 
 int __stdcall OpenPerspectiveTransform7(void) {
+    trace_call("OpenPerspectiveTransform7");
     return mv::orig::OpenPerspectiveTransform7();
 }
 int __stdcall ClosePerspectiveTransform7(void) {
+    trace_call("ClosePerspectiveTransform7");
     return mv::orig::ClosePerspectiveTransform7();
 }
 int __stdcall SetPerspectiveMatrix7(double* m9) {
+    trace_call("SetPerspectiveMatrix7");
     return mv::orig::SetPerspectiveMatrix7(m9);
 }
 void* __stdcall GetLowResTransformParam7(void* f, int w, int h, int* oa, double* ob, double* om) {
+    trace_call("GetLowResTransformParam7", std::format("w={},h={}", w, h));
+    trace_save_frame(f, "GetLowResTransformParam7");
     return mv::orig::GetLowResTransformParam7(f, w, h, oa, ob, om);
 }
 
