@@ -3,6 +3,7 @@
 #include "detect_common.h"
 #include "iplframe.h"
 #include "settings.h"
+#include "thread_pool.h"
 
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
@@ -251,11 +252,15 @@ void rotate_roi(const cv::Mat& roi, double deg, cv::Mat& out, cv::Mat& M) {
 // lands ON the boundary (i.e. truth is outside the window -- e.g. operator put a
 // part in upside-down), we expand to the full sweep so accuracy is preserved.
 double best_angle(const cv::Mat& roi, double priorDeg = std::numeric_limits<double>::quiet_NaN()) {
-    cv::Mat rot;
-    cv::Mat M;
-    std::vector<float> px;
-    std::vector<float> py;
+    // Per-trial scoring helper. rot/M/px/py are thread_local so each worker
+    // thread in the pool keeps its own buffers across the parallel coarse
+    // sweep AND the calling thread reuses them in the serial fine refine.
+    // No per-trial allocation, no shared mutable state.
     auto score_at = [&](double deg) {
+        static thread_local cv::Mat rot;
+        static thread_local cv::Mat M;
+        static thread_local std::vector<float> px;
+        static thread_local std::vector<float> py;
         rotate_roi(roi, deg, rot, M);
         projection(rot, 0, px);
         projection(rot, 1, py);
@@ -283,40 +288,55 @@ double best_angle(const cv::Mat& roi, double priorDeg = std::numeric_limits<doub
     }
     // (else: sweepLo/Hi already initialised to the full (-span, span] above)
 
-    // Coarse sweep -- integer-indexed (no floating-point loop counters).
+    // Coarse sweep -- parallel across the persistent pool (<=4 cores). Each
+    // worker writes its OWN trial's score; the serial reduction below picks
+    // the max in trial-index order with the same strict-> tie-break as the
+    // old serial loop. BIT-IDENTICAL to serial. (Same pattern as
+    // detect_circular_symmetry's coarse grid; see that file.)
+    const int nCoarse =
+        static_cast<int>(std::lround((sweepHi - sweepLo) / kComp.angleCoarseStepDeg));
+    std::vector<double> scores(static_cast<size_t>(nCoarse) + 1);
+    parallel_for(nCoarse + 1, [&](int i) {
+        const double deg = sweepLo + static_cast<double>(i) * kComp.angleCoarseStepDeg;
+        scores[static_cast<size_t>(i)] = score_at(deg);
+    });
     double bestDeg = 0.0;
     double bestScore = -1.0;
     int bestI = -1;
-    const int nCoarse =
-        static_cast<int>(std::lround((sweepHi - sweepLo) / kComp.angleCoarseStepDeg));
     for (int i = 0; i <= nCoarse; ++i) {
-        const double deg = sweepLo + static_cast<double>(i) * kComp.angleCoarseStepDeg;
-        const double s = score_at(deg);
+        const double s = scores[static_cast<size_t>(i)];
         if (s > bestScore) {
             bestScore = s;
-            bestDeg = deg;
+            bestDeg = sweepLo + static_cast<double>(i) * kComp.angleCoarseStepDeg;
             bestI = i;
         }
     }
     // Boundary check: if the narrow sweep's best is at i=0 or i=nCoarse, the true
     // best may lie outside the window. Expand to the full sweep and rescore
     // everything (the savings disappear in this rare edge case but accuracy is
-    // preserved -- the prior was wrong).
+    // preserved -- the prior was wrong). Parallel + same reduction shape.
     if (narrowed && (bestI == 0 || bestI == nCoarse)) {
-        bestScore = -1.0;
         const int nCoarseFull = static_cast<int>(
             std::lround(2.0 * kComp.angleSpanDeg / kComp.angleCoarseStepDeg));
-        for (int i = 0; i <= nCoarseFull; ++i) {
+        std::vector<double> scoresFull(static_cast<size_t>(nCoarseFull) + 1);
+        parallel_for(nCoarseFull + 1, [&](int i) {
             const double deg =
                 -kComp.angleSpanDeg + static_cast<double>(i) * kComp.angleCoarseStepDeg;
-            const double s = score_at(deg);
+            scoresFull[static_cast<size_t>(i)] = score_at(deg);
+        });
+        bestScore = -1.0;
+        for (int i = 0; i <= nCoarseFull; ++i) {
+            const double s = scoresFull[static_cast<size_t>(i)];
             if (s > bestScore) {
                 bestScore = s;
-                bestDeg = deg;
+                bestDeg =
+                    -kComp.angleSpanDeg + static_cast<double>(i) * kComp.angleCoarseStepDeg;
             }
         }
     }
-    // Fine refine: +/- one coarse step around the winner.
+    // Fine refine: +/- one coarse step around the winner. Kept serial -- only
+    // ~21 trials, all on the calling thread, so dispatch overhead would dwarf
+    // the work. The thread_local buffers above carry across from coarse.
     double refineBest = bestDeg;
     double refineScore = bestScore;
     const int nFine =
