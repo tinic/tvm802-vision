@@ -25,18 +25,14 @@ endif()
 message(STATUS "MVision version: ${MVISION_VERSION}")
 
 # The MVision.dll replacement must be x86 to match SurfaceMount.exe (i386). The
-# offline test harness (BUILD_TESTS) has no such constraint, so on a 64-bit host
-# we build the tests only and skip the DLL rather than failing configuration.
+# offline tools (mvision-tune) + test harness (BUILD_TESTS) have no such
+# constraint, so on a 64-bit host (incl. Linux/macOS) we just build those and
+# skip the DLL rather than failing configuration.
 if(CMAKE_SIZEOF_VOID_P EQUAL 4)
     set(_build_dll TRUE)
 else()
     set(_build_dll FALSE)
-    if(NOT BUILD_TESTS)
-        message(FATAL_ERROR
-            "MVision must be built x86 (use an x86 toolchain, e.g. VsDevCmd -arch=x86). "
-            "Configure with -DBUILD_TESTS=ON to build the host-arch test harness instead.")
-    endif()
-    message(STATUS "64-bit host: skipping the x86 MVision.dll target; building tests only.")
+    message(STATUS "64-bit host: skipping the x86 MVision.dll target; building mvision-tune (+ tests if BUILD_TESTS=ON).")
 endif()
 
 # OpenCV from vcpkg (toolchain file passed on the cmake command line).
@@ -159,4 +155,35 @@ if(BUILD_TESTS)
     endif()
     enable_testing()
     add_test(NAME detect_synthetic COMMAND mvision_detect_test)
+endif()
+
+# ---------------------------------------------------------------------------
+# mvision-tune -- offline component-detector tuner with inline-image preview
+# (sixel / kitty / iTerm2). Always built. Cross-platform: needs only OpenCV
+# (already required above) and a C++23 toolchain. constixel is vendored as a
+# git submodule; configure fails with a clear hint if it isn't checked out.
+# ---------------------------------------------------------------------------
+if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/constixel/constixel.hpp")
+    message(WARNING
+        "third_party/constixel/constixel.hpp not found. mvision-tune will not be built. "
+        "Run: git submodule update --init --recursive")
+else()
+    add_executable(mvision-tune tests/mvision_tune.cpp
+        src/detect_common.cpp
+        src/detect_circle.cpp
+        src/detect_contour.cpp
+        src/detect_template.cpp
+        src/detect_symmetry.cpp
+        src/detect_component.cpp
+        src/settings.cpp
+        src/thread_pool.cpp)
+    target_include_directories(mvision-tune PRIVATE src third_party/constixel)
+    target_link_libraries(mvision-tune PRIVATE ${OpenCV_LIBS} Threads::Threads)
+    target_compile_definitions(mvision-tune PRIVATE _CRT_SECURE_NO_WARNINGS)
+    # No /WX or -Werror -- this is a developer tool, third-party constixel
+    # parsing throws a few deprecated-enum-enum-conversion warnings inside
+    # OpenCV's headers that we don't want to gate the build on.
+    if(MSVC)
+        target_compile_options(mvision-tune PRIVATE /Zc:__cplusplus /EHsc /O2)
+    endif()
 endif()

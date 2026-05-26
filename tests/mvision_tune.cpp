@@ -1,20 +1,15 @@
-// Offline up-vision component inspector. Single PNG in, the production
-// detect_component() over it, the same green-box overlay the live preview
-// renders, and an inline-image escape printed to the terminal (sixel /
-// kitty / iTerm2 -- auto-picked from environment variables, mirroring the
-// detection in png2amiga/src/main.cpp). For tuning a specific part class
-// against a captured snapshot without redeploying the DLL.
+// mvision-tune -- offline component-detector tuner with inline-image preview.
+// Single PNG in, the production detect_component() over it, the same green-box
+// overlay the live preview renders, and an inline-image escape printed to the
+// terminal (sixel / kitty / iTerm2 -- auto-picked from environment variables,
+// mirroring the detection in png2amiga/src/main.cpp). For tuning a specific
+// part class against a captured snapshot without redeploying the DLL.
 //
-// Build standalone:
-//   g++ -std=c++23 -O2 -pthread -I src -I third_party/constixel \
-//       tests/inspect_comp.cpp \
-//       src/detect_common.cpp src/detect_circle.cpp src/detect_contour.cpp \
-//       src/detect_template.cpp src/detect_symmetry.cpp src/detect_component.cpp \
-//       src/settings.cpp src/thread_pool.cpp \
-//       $(pkg-config --cflags --libs opencv4) -o /tmp/inspect_comp
+// Cross-platform: needs OpenCV (core/imgproc/imgcodecs) and a C++23 toolchain.
+// Built by the standard cmake flow on Linux / macOS / Windows.
 //
 // Usage:
-//   /tmp/inspect_comp [options] frame.png
+//   mvision-tune [options] frame.png
 // Options:
 //   --thr N         Override CompThre (0-100; 0 = detector default)
 //   --w PX --h PX   Expected body size in px (prior; default unknown -> 0)
@@ -23,7 +18,7 @@
 //                   terminal to make the 640x480 frame readable inline)
 //   --proto P       Force terminal protocol: sixel | kitty | iterm | none
 //                   (default: auto-detect from env). `none` writes the overlay PNG
-//                   to /tmp/inspect_comp_overlay.png and skips terminal output.
+//                   to mvision_tune_overlay.png in CWD and skips terminal output.
 
 #include "vision.h"
 
@@ -264,7 +259,7 @@ void emit_sixel(const cv::Mat& bgr) {
 void emit_png_chunked(Proto p, const cv::Mat& bgr) {
     std::vector<std::uint8_t> png;
     if (!cv::imencode(".png", bgr, png)) {
-        std::fprintf(stderr, "inspect_comp: cv::imencode .png FAILED\n");
+        std::fprintf(stderr, "mvision-tune: cv::imencode .png FAILED\n");
         return;
     }
     auto encoded = base64_encode(png);
@@ -308,7 +303,7 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         auto need = [&](const char* flag) -> const char* {
             if (i + 1 >= argc) {
-                std::fprintf(stderr, "inspect_comp: %s needs an argument\n", flag);
+                std::fprintf(stderr, "mvision-tune: %s needs an argument\n", flag);
                 std::exit(2);
             }
             return argv[++i];
@@ -321,7 +316,7 @@ int main(int argc, char** argv) {
         else if (a == "--scale") scale = std::max(1, std::min(8, std::atoi(need("--scale"))));
         else if (a == "--proto") { forced = parse_proto(need("--proto")); protoForced = true; }
         else if (a.size() > 0 && a[0] == '-') {
-            std::fprintf(stderr, "inspect_comp: unknown flag %s\n", argv[i]);
+            std::fprintf(stderr, "mvision-tune: unknown flag %s\n", argv[i]);
             return 2;
         } else {
             path = argv[i];
@@ -329,14 +324,14 @@ int main(int argc, char** argv) {
     }
     if (!path) {
         std::fprintf(stderr,
-                     "usage: inspect_comp [--thr N] [--w PX] [--h PX] [--a DEG] "
+                     "usage: mvision-tune [--thr N] [--w PX] [--h PX] [--a DEG] "
                      "[--scale N] [--proto sixel|kitty|iterm|none] frame.png\n");
         return 2;
     }
 
     cv::Mat img = cv::imread(path, cv::IMREAD_COLOR);
     if (img.empty()) {
-        std::fprintf(stderr, "inspect_comp: cannot read %s\n", path);
+        std::fprintf(stderr, "mvision-tune: cannot read %s\n", path);
         return 1;
     }
 
@@ -367,18 +362,18 @@ int main(int argc, char** argv) {
                                                            : "none";
     // Summary on stderr so it survives stdout-redirection.
     std::fprintf(stderr,
-                 "inspect_comp: %s  proto=%s  thr=%d  found=%d  "
+                 "mvision-tune: %s  proto=%s  thr=%d  found=%d  "
                  "cx=%.2f cy=%.2f w=%.2f h=%.2f angle=%.2f q=%.3f method=%s\n",
                  path, proto_name(proto), threshold, r.found ? 1 : 0,
                  r.cx, r.cy, r.w, r.h, r.angle, r.quality, method);
 
     if (proto == Proto::none) {
-        const char* outPath = "/tmp/inspect_comp_overlay.png";
+        const char* outPath = "mvision_tune_overlay.png";  // CWD-relative; cross-platform
         if (!cv::imwrite(outPath, overlay)) {
-            std::fprintf(stderr, "inspect_comp: cv::imwrite %s FAILED\n", outPath);
+            std::fprintf(stderr, "mvision-tune: cv::imwrite %s FAILED\n", outPath);
             return 1;
         }
-        std::fprintf(stderr, "inspect_comp: terminal has no inline-image protocol; overlay -> %s\n",
+        std::fprintf(stderr, "mvision-tune: terminal has no inline-image protocol; overlay -> %s\n",
                      outPath);
         return r.found ? 0 : 1;
     }

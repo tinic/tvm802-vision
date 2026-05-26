@@ -26,6 +26,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # constixel submodule for mvision-tune; without this the cmake
+          # configure prints a warning and skips the mvision-tune target.
+          submodules: recursive
 
       - name: Install tools
         run: |
@@ -55,12 +59,33 @@ jobs:
           cmake --build build-lint
           ctest --test-dir build-lint --output-on-failure
 
+  # macOS cross-platform validation: mvision-tune is the only target that
+  # builds here (the MVision.dll path is Windows/MSVC x86 only). Pure source-
+  # only check that the offline tuner stays buildable on macOS via Homebrew
+  # OpenCV. No artifacts uploaded.
+  tune-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install OpenCV
+        run: brew install opencv
+
+      - name: Configure
+        run: cmake -S . -B build
+
+      - name: Build mvision-tune
+        run: cmake --build build --target mvision-tune --parallel
+
   build:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0  # full history + tags so `git describe` yields the version
+          submodules: recursive  # constixel for mvision-tune
 
       - name: Prepare vcpkg binary-cache dir
         shell: pwsh
