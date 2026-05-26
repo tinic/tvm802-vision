@@ -182,6 +182,20 @@ The detector itself has **no per-part-class branching** — there's a single
 generic algorithm and the operator's CompThre value is the only tuning knob.
 Values **0–9 are reserved** for future "special profile" overrides.
 
+### Ctrl + Alt + U — one-shot up-cam snapshot
+
+A second global hotkey arms a single up-cam capture for the next `CheckComp`
+read. On press, the next time the host triggers an up-vision read the DLL
+writes:
+
+- `C:\mvision_capture\snap_NNNN.png` — the raw full-frame capture (always).
+- `C:\mvision_capture\snap_overlay_NNNN.png` — the rendered overlay (green
+  body box + arrow + center cross), only when the prototype detector is
+  active (i.e. the `comp` sentinel + the **Component** checkbox are on).
+
+Independent of the bulk-capture sentinels (`on` / `comp` / `frames`); one
+press = one capture. Pair it with the offline tuner below.
+
 ### Offline component tuner — `tests/inspect_comp.cpp`
 
 A standalone host-side tool for iterating on a specific part class against a

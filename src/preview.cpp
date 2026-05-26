@@ -24,9 +24,25 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 
 namespace vis {
+
+namespace {
+// One-shot overlay snapshot index handoff. Set by CheckComp after consuming
+// cap::consume_snap(); cleared by render_comp_preview when it writes the
+// snap_overlay_<idx>.png, or by release_overlay_snap() if the preview path
+// never runs this round (no hwnd / pure passthrough race / etc.). -1 == idle.
+std::atomic<int> g_snapOverlayIdx{-1};
+}  // namespace
+
+void request_overlay_snap(int idx) {
+    g_snapOverlayIdx.store(idx, std::memory_order_relaxed);
+}
+void release_overlay_snap() {
+    g_snapOverlayIdx.store(-1, std::memory_order_relaxed);
+}
 
 namespace {
 
@@ -408,6 +424,17 @@ bool render_comp_preview(const void* frame, void* hwndV, const CompResult& cr) {
                 if (idx >= 0) {
                     cv::imwrite(std::format("{}\\overlay_{:04d}.png", cap::dir(), idx), work);
                 }
+            } catch (...) {  // NOLINT(bugprone-empty-catch)
+            }
+        }
+        // Ctrl+Alt+U one-shot snapshot handoff. CheckComp already wrote the
+        // raw snap_<idx>.png after consuming cap::consume_snap(); we add the
+        // overlay companion here under the same idx. Atomic exchange so a
+        // stale handoff (e.g. preview was skipped last round) is harmless.
+        const int snapIdx = g_snapOverlayIdx.exchange(-1, std::memory_order_relaxed);
+        if (snapIdx >= 0) {
+            try {
+                cv::imwrite(std::format("{}\\snap_overlay_{:04d}.png", cap::dir(), snapIdx), work);
             } catch (...) {  // NOLINT(bugprone-empty-catch)
             }
         }

@@ -11,6 +11,7 @@
 
 #include "settings_ui.h"
 
+#include "capture.h"
 #include "controller.h"
 #include "settings.h"
 
@@ -45,6 +46,7 @@ std::string g_iniPath;
 
 enum : int { ID_TIMER = 1,
              HOTKEY_ID = 1,
+             SNAP_HOTKEY_ID = 2,  // Ctrl+Alt+U one-shot up-cam snapshot
              ID_BTN_SAVE = 1100,
              ID_BTN_RESET = 1101,
              ID_BTN_CLOSE = 1102,
@@ -627,13 +629,20 @@ void ui_thread() {
     wc.lpszClassName = kClassName;
     RegisterClassExA(&wc);
 
-    // Global hotkey -> WM_HOTKEY posted to THIS thread's queue (NULL hwnd).
+    // Global hotkeys -> WM_HOTKEY posted to THIS thread's queue (NULL hwnd).
+    // Ctrl+Alt+M toggles the settings dialog; Ctrl+Alt+U arms a one-shot
+    // up-cam snapshot consumed by the next CheckComp (raw frame + overlay).
     RegisterHotKey(nullptr, HOTKEY_ID, MOD_CONTROL | MOD_ALT, static_cast<UINT>('M'));
+    RegisterHotKey(nullptr, SNAP_HOTKEY_ID, MOD_CONTROL | MOD_ALT, static_cast<UINT>('U'));
 
     MSG msg;
     while (GetMessageA(&msg, nullptr, 0, 0) > 0) {
         if (msg.message == WM_HOTKEY && msg.wParam == HOTKEY_ID) {
             toggle_window();
+            continue;
+        }
+        if (msg.message == WM_HOTKEY && msg.wParam == SNAP_HOTKEY_ID) {
+            cap::arm_snap();
             continue;
         }
         TranslateMessage(&msg);

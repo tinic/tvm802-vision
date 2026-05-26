@@ -166,4 +166,14 @@ bool render_preview(const void* frame, void* hwnd, double mvoX, double mvoY,
 // the original. NON-DESTRUCTIVE on the frame buffer.
 bool render_comp_preview(const void* frame, void* hwnd, const CompResult& cr);
 
+// One-shot overlay-PNG snapshot handoff. CheckComp calls request_overlay_snap()
+// with a fresh frame index after consuming cap::consume_snap() and writing the
+// raw frame; the next render_comp_preview save the cropped overlay as
+// snap_overlay_<idx>.png (separate from the bulk overlay_<idx>.png stream).
+// Best-effort: if render_comp_preview doesn't run this round (e.g. host hwnd
+// is null or comp is disabled by a sentinel race), the staged idx is dropped
+// at the end of CheckComp via release_overlay_snap().
+void request_overlay_snap(int idx);
+void release_overlay_snap();
+
 }  // namespace vis

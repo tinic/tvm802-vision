@@ -14,6 +14,9 @@ constexpr const char* kFramesTrigger = "C:\\mvision_capture\\frames";
 constexpr const char* kCompTrigger = "C:\\mvision_capture\\comp";
 
 std::atomic<int> g_counter{0};
+// One-shot snapshot flag. Set by the settings-UI Ctrl+Alt+U handler;
+// consumed (atomic exchange) at the top of the next CheckComp.
+std::atomic<bool> g_snapArmed{false};
 
 bool file_exists(const char* path) {
     const DWORD a = GetFileAttributesA(path);
@@ -63,6 +66,14 @@ int next_index() {
 
 const char* dir() {
     return kDir;
+}
+
+void arm_snap() {
+    g_snapArmed.store(true, std::memory_order_relaxed);
+}
+
+bool consume_snap() {
+    return g_snapArmed.exchange(false, std::memory_order_relaxed);
 }
 
 void log_line(std::string_view line) {

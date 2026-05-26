@@ -38,4 +38,14 @@ const char* dir();
 // Append a line to C:\mvision_capture\compare.log.
 void log_line(std::string_view line);
 
+// One-shot up-cam snapshot. The settings-UI thread arms it on Ctrl+Alt+U;
+// the next CheckComp consumes the flag and writes snap_NNNN.png + (best-
+// effort) snap_overlay_NNNN.png. Atomic exchange -- one press, one capture,
+// regardless of whether the bulk-capture sentinels (on / comp / frames)
+// are present. The comp sentinel is still needed for the OVERLAY save
+// (overlay only renders when the prototype detector is active); raw-frame
+// snap_NNNN.png fires unconditionally.
+void arm_snap();
+bool consume_snap();
+
 }  // namespace cap

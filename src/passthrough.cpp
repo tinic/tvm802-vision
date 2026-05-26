@@ -562,11 +562,25 @@ int __stdcall CheckComp(void* f, int hwnd, int w, int h) {
                                         kCompDrive ? 1 : 0, g_compThreshold,
                                         g_compExpW, g_compExpH, g_compExpA));
     trace_save_frame(f, "CheckCompEntry");
+    // Ctrl+Alt+U one-shot snapshot. Fires BEFORE the comp-enabled gate so a raw
+    // up-cam frame is always captured even when our detector is dormant (the
+    // operator just wants to see what the camera sees). The overlay companion
+    // (snap_overlay_<idx>.png) is queued via vis::request_overlay_snap() and
+    // only written if the prototype detector + preview actually run this round.
+    if (cap::consume_snap()) {
+        const int snapIdx = cap::next_index();
+        if (snapIdx >= 0) {
+            vis::save_frame(f, std::format("{}\\snap_{:04d}.png", cap::dir(), snapIdx).c_str());
+            cap::log_line(std::format("# SNAP {} -- Ctrl+Alt+U raw frame", snapIdx));
+            vis::request_overlay_snap(snapIdx);  // best-effort: cleared if preview skips
+        }
+    }
     // Sentinel gate: inert unless the operator opts in. A released DLL carries the
     // prototype but does nothing up-vision until C:\mvision_capture\comp is created.
     // The "Component" UI checkbox is an additional off switch (default on).
     if (!cap::comp_enabled() || !vis::method_enabled(vis::METHOD_COMP)) {
         g_resultSrc = ResultSrc::Original;
+        vis::release_overlay_snap();  // drop stale handoff; no overlay this round
         return mv::orig::CheckComp(f, hwnd, w, h);
     }
 
