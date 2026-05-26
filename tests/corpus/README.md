@@ -13,12 +13,17 @@ and `frames` trigger files were present (see `src/capture.cpp`).
 | `chip_0603/` | 0603/1608 chip caps + resistors (bright metallic terminals over a dim ceramic body). | Catches regressions in the symmetry-primary path on the most common SMT body. |
 | `led_ws2816/` | WS2816C-2121 addressable LEDs (square ~2.1×2.1 mm, single bright body with halo). | Locks-down LED center stability vs the halo gradient — past regressions wandered cx by 5+ px when the symmetry edge picker was loosened. |
 | `sot23/` | SOT-23-3 (2+1 pin layout) and SOT-23-6 (3+3 pin layout) — the body is invisible between bright pin tips. | Exercises the union-of-contours fallback that spans the full body box from individual pin contours. |
-| `fiducial/` | Down-vision `frame_NNNN.png` from a real placement, used by `CheckMark` / `CheckMark2` / `CheckTemplate`. One frame is deliberately interlace-combed (head was still moving when the down-cam captured) so a future fiducial smoke covers the field-aware deinterlace branch as well as the settled woven-frame branch. Currently SKIPPED by `smoke_comp.sh` (the component smoke uses `detect_component` only). Kept here for the future rig. |
+| `fiducial/` | Down-vision `frame_NNNN.png` from a real placement, exercised by `detect_circular_symmetry` (the `CheckMark2` Round path). One frame is deliberately interlace-combed (head was still moving when the down-cam captured) so the smoke covers the field-aware deinterlace branch as well as the settled woven-frame branch. |
 
-The smoke pass criterion is **≥2/3 of frames per class yield a
-plausible-aspect detection** (`min(w,h) >= 10`, `max(w,h) <= 200`, aspect ≤
-6:1). A detector change that drops any class below that floor fails the smoke
-and shouldn't ship.
+The smoke pass criterion is **≥2/3 of frames per class**, rounded up:
+
+- `comp` subdirs (chip, LED, SOT-23, …): a plausible-aspect detection
+  (`min(w,h) >= 10`, `max(w,h) <= 200`, aspect ≤ 6:1).
+- `fid` subdirs: a lock with detected `radius >= 5 px` and `quality > 1.0` —
+  catches both "missed entirely" and "locked onto noise" regressions.
+
+A detector change that drops any class below that floor fails the smoke and
+shouldn't ship.
 
 Frames are real, anonymous, no IP risk — captured on our own machine, no part
 markings visible, no schematic correlation.
