@@ -1,0 +1,3 @@
+[submodule "third_party/constixel"]
+	path = third_party/constixel
+	url = https://github.com/tinic/constixel.git

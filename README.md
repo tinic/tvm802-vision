@@ -182,6 +182,36 @@ The detector itself has **no per-part-class branching** — there's a single
 generic algorithm and the operator's CompThre value is the only tuning knob.
 Values **0–9 are reserved** for future "special profile" overrides.
 
+### Offline component tuner — `tests/inspect_comp.cpp`
+
+A standalone host-side tool for iterating on a specific part class against a
+captured snapshot, without redeploying the DLL. Reads one PNG (`comp_NNNN.png`
+from the live capture or any frame you've saved), runs the production
+`detect_component` over it, renders the same **green oriented body box + arrow
++ sub-pixel center cross** the on-machine preview draws, and prints the result
+inline in your terminal via sixel / kitty / iTerm2 — auto-detected from
+environment variables (same shape as `png2amiga`).
+
+```bash
+# Build (constixel pulled in via git submodule):
+git submodule update --init --recursive
+g++ -std=c++23 -O2 -pthread -I src -I third_party/constixel \
+    tests/inspect_comp.cpp \
+    src/detect_common.cpp src/detect_circle.cpp src/detect_contour.cpp \
+    src/detect_template.cpp src/detect_symmetry.cpp src/detect_component.cpp \
+    src/settings.cpp src/thread_pool.cpp \
+    $(pkg-config --cflags --libs opencv4) -o /tmp/inspect_comp
+
+# Use: pass a CompThre value and watch the overlay update.
+/tmp/inspect_comp --thr 50 captures/comp_0042.png   # auto-detect terminal
+/tmp/inspect_comp --thr 30 --w 50 --h 80 frame.png  # with size prior
+/tmp/inspect_comp --proto none frame.png            # force PNG to /tmp/inspect_comp_overlay.png
+```
+
+Detected protocol covers iTerm2 (incl. SSH via `LC_TERMINAL`), kitty + Ghostty,
+Windows Terminal ≥ 1.22, VS Code integrated terminal (≥ 1.80), and falls back
+to writing the overlay PNG to `/tmp/inspect_comp_overlay.png` on bare terminals.
+
 ### Code-level
 
 Built-in defaults / constants live near the top of the per-mode files under `src/`
