@@ -1,11 +1,20 @@
 // settings_ui.cpp -- the classic Win32 settings dialog (the second part of the
 // module that touches the Windows API, alongside preview.cpp). A DLL-owned thread
-// registers a global hotkey (Ctrl+Alt+M) and serves a modeless dialog with
-// trackbars for the detection knobs (fiducial diameter bracket, Round accept
-// threshold) and a grayscale image-adjustment set (gamma, brightness, contrast,
-// black/white levels, sharpen), plus a LIVE readout (active mode, LOCK/NO-LOCK,
-// score, radius, offset) fed by the detector. The dialog writes vis::Settings (which
-// the detectors read) and persists to a text file.
+// registers a global hotkey (Ctrl+Alt+M) and serves a modeless tabbed dialog:
+//   Detection -- per-mode detection knobs (diameter / sensitivity / exposure /
+//                median-ring; Component-only help line about CompThre routing)
+//   Image     -- pre-detection adjustments (gamma / brightness / contrast /
+//                black-point / white-point / sharpen / blur)
+//   Profiles  -- read-only listing of the 10 CompThre profile slots so the
+//                operator can see what 视觉阈值 = N picks today
+//   Detectors -- master on/off switches per detector (fall back to stock vision)
+// A status banner above the tabs (LOCKED / NO-LOCK, score, radius, offset)
+// stays visible regardless of which tab is active. Footer holds Save / Reset
+// / Close. The dialog writes vis::Settings (which the detectors read) and
+// persists to MVision.ini in the host working directory.
+//
+// Tab implementation: all controls remain children of the main dialog; on
+// TCN_SELCHANGE we ShowWindow each to match the active tab (no reparenting).
 //
 // Build-only on Windows; not part of the off-target test harness.
 
@@ -14,6 +23,7 @@
 #include "capture.h"
 #include "controller.h"
 #include "settings.h"
+#include "vision.h"  // comp_profile_name / comp_profile_count for the Profiles tab
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -24,6 +34,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <format>
 #include <fstream>
 #include <mutex>
@@ -57,7 +68,18 @@ enum : int { ID_TIMER = 1,
              ID_CHK_CIRCULAR = 1105,
              ID_CHK_TEMPLATE = 1106,
              ID_CHK_COMP = 1107,
-             ID_CBO_MODE = 1108 };  // "Edit:" detector dropdown
+             ID_CBO_MODE = 1108,  // "Edit:" detector dropdown
+             ID_TAB = 1109 };     // SysTabControl32
+
+// Tab pages. Each existing control (slider, checkbox, header static, info
+// label) is assigned a Tab via kSliderTab[] / kHeaderTab below. On
+// TCN_SELCHANGE we ShowWindow each control to match the active tab -- no
+// reparenting, controls stay children of the main dialog.
+enum Tab : int { TAB_DETECTION,
+                 TAB_IMAGE,
+                 TAB_PROFILES,
+                 TAB_DETECTORS,
+                 TAB_COUNT };
 
 // One slider per tunable. `kind` drives both the value-label format and the
 // Settings <-> trackbar mapping.
@@ -89,23 +111,25 @@ struct SliderDef {
     int lo, hi;
     Kind kind;
     int y;
+    Tab tab;  // which tab the slider lives on (show/hide on TCN_SELCHANGE)
 };
 
-// Layout (client 420 x 482). Group headers + the median checkbox are separate
-// statics/buttons. Entries are in Idx order; the y values place them in two groups.
+// Layout (client 420 x 480). Sliders are placed inside the tab control's
+// content area (y >= ~115). Detection-tab sliders occupy y=120..220;
+// Image-tab sliders y=120..295.
 const std::array<SliderDef, S_COUNT> kDefs = {{
-    {.label = "Diameter min", .lo = 0, .hi = 120, .kind = K_PX, .y = 46},        // S_RMIN (slider is RADIUS px; shown as diameter)
-    {.label = "Diameter max", .lo = 0, .hi = 120, .kind = K_PX, .y = 71},        // S_RMAX (slider is RADIUS px; shown as diameter)
-    {.label = "Sensitivity", .lo = 0, .hi = 200, .kind = K_SENS, .y = 96},       // S_SYM   (accept threshold, quadratic map)
-    {.label = "Gamma", .lo = 0, .hi = 40, .kind = K_GAMMA, .y = 214},            // S_GAMMA (x10)
-    {.label = "Brightness", .lo = -128, .hi = 128, .kind = K_SINT, .y = 239},    // S_BRI
-    {.label = "Contrast", .lo = 0, .hi = 30, .kind = K_THR, .y = 264},           // S_CON   (x10)
-    {.label = "Black point", .lo = 0, .hi = 128, .kind = K_INT, .y = 289},       // S_BLK
-    {.label = "White point", .lo = 0, .hi = 128, .kind = K_INT, .y = 314},       // S_WHT
-    {.label = "Sharpen", .lo = -10, .hi = 10, .kind = K_STENTHS, .y = 339},      // S_SHP   (x10)
-    {.label = "Exposure min", .lo = 0, .hi = 128, .kind = K_AUTOINT, .y = 121},  // S_EXPLO (frame-mean gate low)
-    {.label = "Exposure max", .lo = 0, .hi = 255, .kind = K_AUTOINT, .y = 146},  // S_EXPHI (frame-mean gate high)
-    {.label = "Blur", .lo = 0, .hi = 25, .kind = K_BLUR, .y = 364},              // S_BLUR  (pre-blur kernel px)
+    {.label = "Diameter min", .lo = 0, .hi = 120, .kind = K_PX, .y = 120, .tab = TAB_DETECTION},       // S_RMIN
+    {.label = "Diameter max", .lo = 0, .hi = 120, .kind = K_PX, .y = 145, .tab = TAB_DETECTION},       // S_RMAX
+    {.label = "Sensitivity", .lo = 0, .hi = 200, .kind = K_SENS, .y = 170, .tab = TAB_DETECTION},      // S_SYM
+    {.label = "Gamma", .lo = 0, .hi = 40, .kind = K_GAMMA, .y = 120, .tab = TAB_IMAGE},                // S_GAMMA
+    {.label = "Brightness", .lo = -128, .hi = 128, .kind = K_SINT, .y = 145, .tab = TAB_IMAGE},        // S_BRI
+    {.label = "Contrast", .lo = 0, .hi = 30, .kind = K_THR, .y = 170, .tab = TAB_IMAGE},               // S_CON
+    {.label = "Black point", .lo = 0, .hi = 128, .kind = K_INT, .y = 195, .tab = TAB_IMAGE},           // S_BLK
+    {.label = "White point", .lo = 0, .hi = 128, .kind = K_INT, .y = 220, .tab = TAB_IMAGE},           // S_WHT
+    {.label = "Sharpen", .lo = -10, .hi = 10, .kind = K_STENTHS, .y = 245, .tab = TAB_IMAGE},          // S_SHP
+    {.label = "Exposure min", .lo = 0, .hi = 128, .kind = K_AUTOINT, .y = 195, .tab = TAB_DETECTION},  // S_EXPLO
+    {.label = "Exposure max", .lo = 0, .hi = 255, .kind = K_AUTOINT, .y = 220, .tab = TAB_DETECTION},  // S_EXPHI
+    {.label = "Blur", .lo = 0, .hi = 25, .kind = K_BLUR, .y = 270, .tab = TAB_IMAGE},                  // S_BLUR
 }};
 
 HINSTANCE g_inst = nullptr;
@@ -123,6 +147,15 @@ int g_curMode = MODE_ROUND;              // which mode's settings the sliders cu
 bool g_modeManual = false;               // operator picked a mode -> stop auto-following until reopen
 HFONT g_font = nullptr;                  // host-matching UI font (system dialog font)
 HANDLE g_actctx = INVALID_HANDLE_VALUE;  // comctl32 v6 activation context -> themed controls
+
+// Tab control + per-tab control sets. Each control is born on whatever tab
+// it belongs to and is shown/hidden on TCN_SELCHANGE; no reparenting.
+HWND g_tabs = nullptr;
+int g_curTab = TAB_DETECTION;
+HWND g_lblHelpDetectors = nullptr;    // "Uncheck = use stock" header on Detectors tab
+HWND g_lblHelpComp = nullptr;         // "CompThre 0-9 = profile..." help on Detection tab when Component
+HWND g_lblProfileHelp = nullptr;      // top-of-tab help on Profiles tab
+std::array<HWND, 10> g_lblProfile{};  // 10 slot-row labels on Profiles tab
 
 // The system dialog font -- what native dialogs and the (themed) host use, so our
 // controls match instead of the legacy bitmap "System" font.
@@ -179,6 +212,35 @@ HANDLE make_v6_context() {
 HWND make_static(HWND parent, const char* text, int x, int y, int w, int h) {
     return CreateWindowExA(0, "STATIC", text, WS_CHILD | WS_VISIBLE, x, y, w, h, parent,
                            nullptr, g_inst, nullptr);
+}
+
+// Show the per-tab control set; hide everything else. Cheap (just SW_HIDE /
+// SW_SHOW per control) and runs only on tab-change.
+void show_tab(int tab) {
+    g_curTab = tab;
+    for (std::size_t i = 0; i < kDefs.size(); ++i) {
+        const int cmd = (kDefs[i].tab == tab) ? SW_SHOWNA : SW_HIDE;
+        ShowWindow(g_tb[i], cmd);
+        ShowWindow(g_lblName[i], cmd);
+        ShowWindow(g_lblVal[i], cmd);
+    }
+    ShowWindow(g_chkMedian, (tab == TAB_DETECTION) ? SW_SHOWNA : SW_HIDE);
+    if (g_lblHelpComp != nullptr) {
+        ShowWindow(g_lblHelpComp,
+                   (tab == TAB_DETECTION && g_curMode == MODE_COMP) ? SW_SHOWNA : SW_HIDE);
+    }
+    for (auto& h : g_chkMethod) {
+        ShowWindow(h, (tab == TAB_DETECTORS) ? SW_SHOWNA : SW_HIDE);
+    }
+    if (g_lblHelpDetectors != nullptr) {
+        ShowWindow(g_lblHelpDetectors, (tab == TAB_DETECTORS) ? SW_SHOWNA : SW_HIDE);
+    }
+    if (g_lblProfileHelp != nullptr) {
+        ShowWindow(g_lblProfileHelp, (tab == TAB_PROFILES) ? SW_SHOWNA : SW_HIDE);
+    }
+    for (auto& h : g_lblProfile) {
+        ShowWindow(h, (tab == TAB_PROFILES) ? SW_SHOWNA : SW_HIDE);
+    }
 }
 
 HWND make_button(HWND parent, int id, const char* text, int x, int y, int w, int h) {
@@ -341,6 +403,13 @@ void update_enabled(int mode) {
         EnableWindow(g_lblVal[i], en);
     }
     EnableWindow(g_chkMedian, mode == MODE_ROUND ? TRUE : FALSE);  // median ring scoring: Round only
+    // The Component-help label on the Detection tab is only meaningful when
+    // editing Component settings; keep it visible/hidden in step with both
+    // the active tab AND the active mode.
+    if (g_lblHelpComp != nullptr) {
+        ShowWindow(g_lblHelpComp,
+                   (g_curTab == TAB_DETECTION && mode == MODE_COMP) ? SW_SHOWNA : SW_HIDE);
+    }
 }
 
 void controls_from_settings() {
@@ -434,9 +503,10 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             case WM_CREATE: {
                 INITCOMMONCONTROLSEX icc{};
                 icc.dwSize = sizeof icc;
-                icc.dwICC = ICC_BAR_CLASSES;
+                icc.dwICC = ICC_BAR_CLASSES | ICC_TAB_CLASSES;
                 InitCommonControlsEx(&icc);
 
+                // ---- Header: active-mode label + "Edit:" dropdown -------------
                 g_lblMode = make_static(hwnd, "Active mode:  (none yet)", 12, 8, 206, 18);
                 make_static(hwnd, "Edit:", 224, 9, 30, 16);
                 g_cboMode = CreateWindowExA(0, "COMBOBOX", "",
@@ -447,31 +517,74 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 for (const char* name : {"Round", "Circular", "ImageTemplate", "Component"}) {
                     SendMessageA(g_cboMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(name));
                 }
-                make_static(hwnd, "- Detection -", 12, 28, 200, 16);
-                make_static(hwnd, "- Image adjustments -", 12, 196, 240, 16);
 
-                for (std::size_t i = 0; i < kDefs.size(); ++i) {
-                    g_lblName[i] = make_static(hwnd, kDefs[i].label, 12, kDefs[i].y + 2, 90, 18);  // wide enough for "Exposure min"
-                    g_tb[i] = CreateWindowExA(0, "msctls_trackbar32", "",
-                                              WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
-                                              106, kDefs[i].y, 176, 24, hwnd, nullptr, g_inst, nullptr);
-                    SendMessageA(g_tb[i], TBM_SETRANGEMIN, FALSE, static_cast<LPARAM>(kDefs[i].lo));
-                    SendMessageA(g_tb[i], TBM_SETRANGEMAX, TRUE, static_cast<LPARAM>(kDefs[i].hi));
-                    g_lblVal[i] = make_static(hwnd, "Auto", 288, kDefs[i].y + 2, 124, 18);  // wide for "NN px (M.MM mm)"
+                // ---- Status banner: pinned at the top, always visible ---------
+                g_lblStatus = make_static(hwnd, " NO LOCK", 12, 34, 396, 42);
+
+                // ---- Tab control covering the middle band ---------------------
+                g_tabs = CreateWindowExA(0, WC_TABCONTROLA, "",
+                                         WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+                                         8, 84, 404, 320, hwnd,
+                                         reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TAB)),
+                                         g_inst, nullptr);
+                {
+                    // Tab labels: TCITEMA.pszText is non-const, so use modifiable
+                    // char arrays instead of a string-literal table + const_cast.
+                    std::array<std::array<char, 16>, TAB_COUNT> tabLabels{};
+                    static constexpr std::array<const char*, TAB_COUNT> kTabLabels = {
+                        "Detection", "Image", "Profiles", "Detectors"};
+                    for (int i = 0; i < TAB_COUNT; ++i) {
+                        std::strncpy(tabLabels[i].data(), kTabLabels[i], tabLabels[i].size() - 1);
+                        TCITEMA ti{};
+                        ti.mask = TCIF_TEXT;
+                        ti.pszText = tabLabels[i].data();
+                        SendMessageA(g_tabs, TCM_INSERTITEMA, static_cast<WPARAM>(i),
+                                     reinterpret_cast<LPARAM>(&ti));
+                    }
                 }
 
+                // ---- Sliders + their name/value labels ------------------------
+                // y values come from kDefs (per-tab). Tab assignment too -- the
+                // initial show_tab() at the bottom hides the off-tab ones.
+                for (std::size_t i = 0; i < kDefs.size(); ++i) {
+                    g_lblName[i] = make_static(hwnd, kDefs[i].label, 24, kDefs[i].y + 2, 90, 18);
+                    g_tb[i] = CreateWindowExA(0, "msctls_trackbar32", "",
+                                              WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
+                                              118, kDefs[i].y, 176, 24, hwnd, nullptr, g_inst, nullptr);
+                    SendMessageA(g_tb[i], TBM_SETRANGEMIN, FALSE, static_cast<LPARAM>(kDefs[i].lo));
+                    SendMessageA(g_tb[i], TBM_SETRANGEMAX, TRUE, static_cast<LPARAM>(kDefs[i].hi));
+                    g_lblVal[i] = make_static(hwnd, "Auto", 300, kDefs[i].y + 2, 100, 18);
+                }
+
+                // ---- Detection tab: median checkbox + Component help line -----
                 g_chkMedian = CreateWindowExA(0, "BUTTON", "Median ring scoring (robust to glare)",
                                               WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                                              12, 172, 340, 20, hwnd,
+                                              24, 250, 340, 20, hwnd,
                                               reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_CHK_MEDIAN)),
                                               g_inst, nullptr);
+                g_lblHelpComp = make_static(hwnd,
+                                            "CompThre in host ParamEdit: 0-9 = profile slot (see Profiles tab),\n"
+                                            "10-100 = manual % of ROI max brightness.",
+                                            24, 278, 360, 38);
 
-                g_lblStatus = make_static(hwnd, " NO LOCK", 12, 394, 396, 42);
+                // ---- Profiles tab: slot listing + help ------------------------
+                g_lblProfileHelp = make_static(hwnd,
+                                               "Set 视觉阈值 in host ParamEdit per feeder slot. Save the placement CSV\n"
+                                               "after editing -- it carries the per-slot values.",
+                                               24, 110, 360, 32);
+                for (int slot = 0; slot < static_cast<int>(g_lblProfile.size()); ++slot) {
+                    const char* nm = comp_profile_name(slot);
+                    const std::string row = std::format(
+                        "{:>2}    {}", slot,
+                        nm != nullptr ? nm : "(reserved -- falls through to AUTO)");
+                    g_lblProfile[static_cast<std::size_t>(slot)] =
+                        make_static(hwnd, row.c_str(), 36, 150 + slot * 18, 360, 18);
+                }
 
-                // Detector master switches (GLOBAL, not per-mode): uncheck to fall back
-                // to the stock vision for that method. State persists in the INI [enable]
-                // section on Save. Applied live -- the dispatch checks method_enabled().
-                make_static(hwnd, "- Detectors (uncheck = use stock) -", 12, 442, 320, 16);
+                // ---- Detectors tab: master switches ---------------------------
+                g_lblHelpDetectors = make_static(hwnd,
+                                                 "Uncheck a detector to fall back to the stock vision for that mode.",
+                                                 24, 110, 360, 18);
                 struct ChkDef {
                     int id;
                     int method;
@@ -485,19 +598,18 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 }};
                 for (std::size_t i = 0; i < chk.size(); ++i) {
                     g_chkMethod[i] = CreateWindowExA(
-                        0, "BUTTON", chk[i].label, WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 12,
-                        462 + static_cast<int>(i) * 22, 380, 20, hwnd,
+                        0, "BUTTON", chk[i].label, WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 24,
+                        140 + static_cast<int>(i) * 24, 360, 20, hwnd,
                         reinterpret_cast<HMENU>(static_cast<INT_PTR>(chk[i].id)), g_inst, nullptr);
                     SendMessageA(g_chkMethod[i], BM_SETCHECK,
                                  method_enabled(chk[i].method) ? BST_CHECKED : BST_UNCHECKED, 0);
                 }
 
-                // Center the bottom button row on the ACTUAL client width (computed, not
-                // hard-coded x positions) so it stays centered regardless of width / DPI.
+                // ---- Footer buttons: centered on the actual client width ------
                 constexpr int kBtnW = 80;
                 constexpr int kBtnH = 26;
                 constexpr int kBtnGap = 10;
-                constexpr int kBtnY = 558;
+                constexpr int kBtnY = 420;
                 constexpr int kNBtn = 3;
                 RECT cr{};
                 GetClientRect(hwnd, &cr);
@@ -518,6 +630,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     EnumChildWindows(hwnd, set_font_cb, reinterpret_cast<LPARAM>(g_font));
                     SendMessageA(hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(g_font), TRUE);
                 }
+                show_tab(TAB_DETECTION);  // initial tab visibility
                 SetTimer(hwnd, static_cast<UINT_PTR>(ID_TIMER), 120, nullptr);
                 return 0;
             }
@@ -527,6 +640,16 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             case WM_TIMER:
                 refresh_status();
                 return 0;
+            case WM_NOTIFY: {
+                const auto* nm = reinterpret_cast<NMHDR*>(lParam);
+                if (nm != nullptr && nm->hwndFrom == g_tabs && nm->code == TCN_SELCHANGE) {
+                    const int t = static_cast<int>(SendMessageA(g_tabs, TCM_GETCURSEL, 0, 0));
+                    if (t >= 0 && t < TAB_COUNT) {
+                        show_tab(t);
+                    }
+                }
+                return 0;
+            }
             case WM_CTLCOLORSTATIC: {
                 HWND ctl = reinterpret_cast<HWND>(lParam);
                 if (ctl == g_lblStatus) {
@@ -582,7 +705,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 void create_window() {
     const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
     const DWORD ex = WS_EX_TOPMOST | WS_EX_TOOLWINDOW;
-    RECT wr{0, 0, 420, 600};
+    RECT wr{0, 0, 420, 470};
     AdjustWindowRectEx(&wr, style, FALSE, ex);
     // Activate the v6 context around creation so this window AND the child controls
     // it makes in WM_CREATE render themed.
