@@ -229,32 +229,53 @@ bool render_preview(const void* frame, void* hwndV, double mvoX, double mvoY,
 
         const int RT = 1;  // red overlay thickness -- 1px, antialiased on the 1:1 display
         // Reference crosshair (red) at the crop center == the reference point.
+        // Pixel-aligned (a reference axis, not a measurement -- stays sharp on the grid).
         cv::line(work, cv::Point(cw / 2, 0), cv::Point(cw / 2, ch), cv::Scalar(0, 0, 255), RT, cv::LINE_AA);
         cv::line(work, cv::Point(0, ch / 2), cv::Point(cw, ch / 2), cv::Scalar(0, 0, 255), RT, cv::LINE_AA);
-        // Search-area ("Range") circle (red) — detection is limited to inside this.
+        // Search-area ("Range") circle (red) -- detection is limited to inside this.
+        // Sub-pixel raster so the circumference traces cleanly without polyline kinks.
+        constexpr int kShift = 4;                            // 1/16 px sub-pixel rasterisation
+        constexpr int kSubI = 1 << kShift;                   // == 16
+        constexpr double kSub = static_cast<double>(kSubI);  // == 16.0
+        const auto sp = [&](double x, double y) {            // double -> sub-pixel cv::Point
+            return cv::Point(cvRound(x * kSub), cvRound(y * kSub));
+        };
         if (searchRadiusPx > 0) {
-            cv::circle(work, cv::Point(cw / 2, ch / 2), searchRadiusPx, cv::Scalar(0, 0, 255), RT, cv::LINE_AA);
+            cv::circle(work, cv::Point((cw / 2) * kSubI, (ch / 2) * kSubI), searchRadiusPx * kSubI,
+                       cv::Scalar(0, 0, 255), RT, cv::LINE_AA, kShift);
         }
 
         // Tick marks along the crosshair every 0.25 mm (down-camera px/mm scale).
+        // Pixel-aligned -- these ARE the measurement ruler.
         draw_mm_ticks(work, cw, ch, down_cam_scale(), RT);
 
         // Our detection (green) mapped from frame coords into crop coords. The
         // overlay style depends on the mode: a square for ImageTemplate (the
-        // matched region), else a circle (Circular and Round).
+        // matched region), else a circle (Circular and Round). Everything below
+        // rasterises at 1/16 px sub-pixel so the centre and radius track our
+        // sub-pixel detection cleanly (no per-frame snap shimmer).
         if (mr.found) {
             const double cropLeft = cx - cw / 2.0;
             const double cropTop = cy - ch / 2.0;
-            const int u = cvRound((W - mr.cx) - cropLeft);
-            const int v = cvRound((H - mr.cy) - cropTop);
-            const int rad = cvRound(mr.radius);
+            const double u = (W - mr.cx) - cropLeft;
+            const double v = (H - mr.cy) - cropTop;
+            const double rad = mr.radius;
             const cv::Scalar green(0, 255, 0);
             if (mr.shape == MarkShape::Square) {
-                cv::rectangle(work, cv::Point(u - rad, v - rad), cv::Point(u + rad, v + rad), green, 1, cv::LINE_AA);
+                cv::rectangle(work, sp(u - rad, v - rad), sp(u + rad, v + rad),
+                              green, 1, cv::LINE_AA, kShift);
             } else {
-                cv::circle(work, cv::Point(u, v), rad, green, 1, cv::LINE_AA);
+                cv::circle(work, sp(u, v), static_cast<int>(std::lround(rad * kSub)),
+                           green, 1, cv::LINE_AA, kShift);
             }
-            cv::drawMarker(work, cv::Point(u, v), green, cv::MARKER_CROSS, 14, 1, cv::LINE_AA);
+            // Centre cross: drawMarker doesn't accept a shift arg, so two
+            // sub-pixel cv::line calls. kCrossHalf=7 matches drawMarker's old
+            // size=14 (length per arm).
+            constexpr double kCrossHalf = 7.0;
+            cv::line(work, sp(u - kCrossHalf, v), sp(u + kCrossHalf, v),
+                     green, 1, cv::LINE_AA, kShift);
+            cv::line(work, sp(u, v - kCrossHalf), sp(u, v + kCrossHalf),
+                     green, 1, cv::LINE_AA, kShift);
         }
 
         draw_settings_hint(work, cw);  // "Ctrl+Alt+M: settings" hint, top-right
