@@ -101,7 +101,7 @@ Template g_tmpl;
 // up-vision iterative servo INTENTIONALLY moves the part between consecutive
 // CheckComp reads (each correction nudges the nozzle); cx/cy/angle should
 // track that motion truthfully, but W/H is the part's intrinsic size and the
-// host's size-check (vision-bit in 检料方式) wants a single stable measurement
+// host's size-check (vision-bit in the host's check-method mask) wants a single stable measurement
 // across the servo's read sequence. Per-frame mask jitter (different terminals
 // crossing threshold, different morph-close bridging) wobbles W/H by ~5-15 px
 // even when the part itself is stationary. A windowed median over the last

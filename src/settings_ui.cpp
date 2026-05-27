@@ -6,7 +6,7 @@
 //   Image     -- pre-detection adjustments (gamma / brightness / contrast /
 //                black-point / white-point / sharpen / blur)
 //   Profiles  -- read-only listing of the 10 CompThre profile slots so the
-//                operator can see what 视觉阈值 = N picks today
+//                operator can see what CompThre = N picks today
 //   Detectors -- master on/off switches per detector (fall back to stock vision)
 // A status banner above the tabs (LOCKED / NO-LOCK, score, radius, offset)
 // stays visible regardless of which tab is active. Footer holds Save / Reset
@@ -30,6 +30,7 @@
 #endif
 #include <windows.h>
 #include <commctrl.h>
+#include <uxtheme.h>  // EnableThemeDialogTexture -- makes the tab content bg match the dialog
 
 #include <algorithm>
 #include <array>
@@ -506,6 +507,15 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 icc.dwICC = ICC_BAR_CLASSES | ICC_TAB_CLASSES;
                 InitCommonControlsEx(&icc);
 
+                // Make the tab control's content area use the themed tab-body
+                // background instead of stark white. Without this, the tab pages
+                // render with a hard-coded white fill that mismatches the rest
+                // of the dialog (COLOR_BTNFACE gray) -- visible as a bright
+                // white band around the per-tab controls. ETDT_ENABLETAB =
+                // ETDT_ENABLE | ETDT_USETABTEXTURE; the dialog draws its own
+                // background as the themed tab body when this is set.
+                EnableThemeDialogTexture(hwnd, ETDT_ENABLETAB);
+
                 // ---- Header: active-mode label + "Edit:" dropdown -------------
                 g_lblMode = make_static(hwnd, "Active mode:  (none yet)", 12, 8, 206, 18);
                 make_static(hwnd, "Edit:", 224, 9, 30, 16);
@@ -569,7 +579,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
                 // ---- Profiles tab: slot listing + help ------------------------
                 g_lblProfileHelp = make_static(hwnd,
-                                               "Set 视觉阈值 in host ParamEdit per feeder slot. Save the placement CSV\n"
+                                               "Set CompThre in host ParamEdit per feeder slot. Save the placement CSV\n"
                                                "after editing -- it carries the per-slot values.",
                                                24, 110, 360, 32);
                 for (int slot = 0; slot < static_cast<int>(g_lblProfile.size()); ++slot) {

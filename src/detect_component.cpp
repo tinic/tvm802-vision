@@ -45,7 +45,7 @@ struct CompParams {
 };
 constexpr CompParams kComp;
 
-// CompThre profile slots. The operator-typed 视觉阈值 column accepts 0-100;
+// CompThre profile slots. The operator-typed CompThre column accepts 0-100;
 // the upper 90% of that range (10-100) is the existing manual %-of-max-
 // brightness threshold. Values 0-9 are RESERVED for "special profiles" --
 // detector presets we'll fill in per-board as real PCBs demand custom
@@ -664,7 +664,7 @@ CompResult detect_component(const void* frame,
         }
 
         // Always also run the union-of-contours fallback. CompThre (the
-        // operator's per-stack 视觉阈值, % of ROI max) tunes which features
+        // operator's per-stack CompThre, % of ROI max) tunes which features
         // the binarization catches; the LARGER plausible-pose result wins.
         // The two paths are complementary -- symmetry locks cleanly on
         // single-bright-body parts (LEDs); union spans multi-feature parts
