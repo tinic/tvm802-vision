@@ -216,10 +216,12 @@ double g_upoX = 0.0, g_upoY = 0.0;                             // up-vision offs
 constexpr double kUpScale = 1.0;      // size + offset are reported in raw pixels
 constexpr double kUpAngleSign = 1.0;  // angle handedness matches ours -- no flip
 
-// SHADOW by default: our component detector runs read-only alongside the original,
-// which keeps DRIVING placement; both results are logged (when capture is armed) so
-// the transform above can be calibrated on real frames at zero placement risk. Flip
-// to true to let our detector drive (only after the kUp* constants are confirmed).
+// OUR component detector drives placement; the original is invoked for its
+// preview/log side effects only. kCompDrive used to be a compile-time
+// shadow/drive switch (false = our detector runs read-only alongside the
+// original, logging both for kUp*-constants calibration) and survives here
+// so the shadow branch stays compiled -- useful if a future detector
+// refactor needs the same calibration loop -- but ships as true.
 constexpr bool kCompDrive = true;
 
 // Compute our result in the native convention from a detection.
@@ -334,7 +336,7 @@ void up_reference_point(const void* frame, double* refX, double* refY) {
     *refY = h / 2.0 - g_upoY;
 }
 
-// Shadow/Phase-0 logging for CheckComp (opt-in via the capture trigger). Logs OUR
+// CheckComp diagnostic logging (gated on the `on` capture trigger). Logs OUR
 // component pose and the ORIGINAL's packed result (read back from its GetOffset/
 // GetMin_val) for the SAME frame, plus the host inputs -- the dataset that
 // calibrates the comp packing (kUp* constants) and vets our detector vs the vendor.
@@ -543,14 +545,12 @@ void* __stdcall QueryFrame(void* cam, int timeout) {
     return r;
 }
 
-// CheckComp (up-vision component pose). PROTOTYPE -- disabled by default. The whole
-// path is gated behind the C:\mvision_capture\comp sentinel: with it ABSENT (the
-// shipped default) this is a pure passthrough to the original and our detector never
-// runs -- zero added cost or risk. With the sentinel PRESENT, our rectlinear-symmetry
-// detector runs on every call; by default (kCompDrive=false) it is SHADOW-ONLY (the
-// original still drives placement, both results logged for calibration). Only with
-// BOTH the sentinel present AND kCompDrive=true (compile-time) does our pose drive
-// placement via the comp-mode GetOffset packing, with the original called for preview.
+// CheckComp (up-vision component pose). Our rectlinear-symmetry detector drives
+// placement by default; the operator's only switch is the "Component" checkbox
+// in Ctrl+Alt+M -> Detectors strip (default ON). With the checkbox off this is
+// a pure passthrough to the original. The compile-time `kCompDrive=true` flag
+// keeps the shadow-mode path compiled (for future calibration runs) but never
+// triggers in shipped builds.
 int __stdcall CheckComp(void* f, int hwnd, int w, int h) {
     // Unconditional entry trace + frame snapshot, BEFORE any gate. Even when our
     // detector bypasses (the "Component" checkbox off), we still get a log line
