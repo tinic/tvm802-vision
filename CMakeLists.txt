@@ -87,6 +87,20 @@ function(find_mvision_libusb)
             return()
         endif()
     endif()
+    # Fallback: plain find_path / find_library. vcpkg seeds CMAKE_PREFIX_PATH
+    # via its toolchain file, so the vcpkg-installed libusb is found here
+    # even when the port doesn't ship a Config.cmake AND no system
+    # pkg-config exists (Windows CI runner). The include lives in a
+    # libusb-1.0/ subdir per the port's layout; PATH_SUFFIXES strips that.
+    find_path(LIBUSB_HEADER_DIR NAMES libusb.h PATH_SUFFIXES libusb-1.0)
+    find_library(LIBUSB_LIB NAMES libusb-1.0 usb-1.0)
+    if(LIBUSB_HEADER_DIR AND LIBUSB_LIB)
+        add_library(mvision_libusb INTERFACE)
+        target_include_directories(mvision_libusb INTERFACE ${LIBUSB_HEADER_DIR})
+        target_link_libraries(mvision_libusb INTERFACE ${LIBUSB_LIB})
+        message(STATUS "libusb-1.0 via find_path/find_library (${LIBUSB_LIB})")
+        return()
+    endif()
     message(FATAL_ERROR
         "libusb-1.0 not found. On Linux: apt install libusb-1.0-0-dev. "
         "On Windows (vcpkg): add 'libusb' to vcpkg.json. "
