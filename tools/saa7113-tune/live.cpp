@@ -36,6 +36,7 @@
 #include <libusb.h>
 
 #define WIN32_LEAN_AND_MEAN
+#define NOMINMAX  // MSVC: keep <windows.h> from defining min/max macros that collide with std::min/max
 #include <windows.h>
 
 #include <algorithm>
