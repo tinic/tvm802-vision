@@ -125,22 +125,22 @@ struct SliderDef {
     Tab tab;  // which tab the slider lives on (show/hide on TCN_SELCHANGE)
 };
 
-// Layout (client 420 x 480). Sliders are placed inside the tab control's
-// content area (y >= ~115). Detection-tab sliders occupy y=120..220;
-// Image-tab sliders y=120..295.
+// Layout (client 420 x 460). Sliders placed inside the tab control's content
+// area (y starts ~125, 28-px row spacing). Detection-tab sliders y=125..237;
+// Image-tab sliders y=125..293.
 const std::array<SliderDef, S_COUNT> kDefs = {{
-    {.label = "Diameter min", .lo = 0, .hi = 120, .kind = K_PX, .y = 120, .tab = TAB_DETECTION},       // S_RMIN
-    {.label = "Diameter max", .lo = 0, .hi = 120, .kind = K_PX, .y = 145, .tab = TAB_DETECTION},       // S_RMAX
-    {.label = "Sensitivity", .lo = 0, .hi = 200, .kind = K_SENS, .y = 170, .tab = TAB_DETECTION},      // S_SYM
-    {.label = "Gamma", .lo = 0, .hi = 40, .kind = K_GAMMA, .y = 120, .tab = TAB_IMAGE},                // S_GAMMA
-    {.label = "Brightness", .lo = -128, .hi = 128, .kind = K_SINT, .y = 145, .tab = TAB_IMAGE},        // S_BRI
-    {.label = "Contrast", .lo = 0, .hi = 30, .kind = K_THR, .y = 170, .tab = TAB_IMAGE},               // S_CON
-    {.label = "Black point", .lo = 0, .hi = 128, .kind = K_INT, .y = 195, .tab = TAB_IMAGE},           // S_BLK
-    {.label = "White point", .lo = 0, .hi = 128, .kind = K_INT, .y = 220, .tab = TAB_IMAGE},           // S_WHT
-    {.label = "Sharpen", .lo = -10, .hi = 10, .kind = K_STENTHS, .y = 245, .tab = TAB_IMAGE},          // S_SHP
-    {.label = "Exposure min", .lo = 0, .hi = 128, .kind = K_AUTOINT, .y = 195, .tab = TAB_DETECTION},  // S_EXPLO
-    {.label = "Exposure max", .lo = 0, .hi = 255, .kind = K_AUTOINT, .y = 220, .tab = TAB_DETECTION},  // S_EXPHI
-    {.label = "Blur", .lo = 0, .hi = 25, .kind = K_BLUR, .y = 270, .tab = TAB_IMAGE},                  // S_BLUR
+    {.label = "Diameter min", .lo = 0, .hi = 120, .kind = K_PX, .y = 125, .tab = TAB_DETECTION},       // S_RMIN
+    {.label = "Diameter max", .lo = 0, .hi = 120, .kind = K_PX, .y = 153, .tab = TAB_DETECTION},       // S_RMAX
+    {.label = "Sensitivity", .lo = 0, .hi = 200, .kind = K_SENS, .y = 181, .tab = TAB_DETECTION},      // S_SYM
+    {.label = "Gamma", .lo = 0, .hi = 40, .kind = K_GAMMA, .y = 125, .tab = TAB_IMAGE},                // S_GAMMA
+    {.label = "Brightness", .lo = -128, .hi = 128, .kind = K_SINT, .y = 153, .tab = TAB_IMAGE},        // S_BRI
+    {.label = "Contrast", .lo = 0, .hi = 30, .kind = K_THR, .y = 181, .tab = TAB_IMAGE},               // S_CON
+    {.label = "Black point", .lo = 0, .hi = 128, .kind = K_INT, .y = 209, .tab = TAB_IMAGE},           // S_BLK
+    {.label = "White point", .lo = 0, .hi = 128, .kind = K_INT, .y = 237, .tab = TAB_IMAGE},           // S_WHT
+    {.label = "Sharpen", .lo = -10, .hi = 10, .kind = K_STENTHS, .y = 265, .tab = TAB_IMAGE},          // S_SHP
+    {.label = "Exposure min", .lo = 0, .hi = 128, .kind = K_AUTOINT, .y = 209, .tab = TAB_DETECTION},  // S_EXPLO
+    {.label = "Exposure max", .lo = 0, .hi = 255, .kind = K_AUTOINT, .y = 237, .tab = TAB_DETECTION},  // S_EXPHI
+    {.label = "Blur", .lo = 0, .hi = 25, .kind = K_BLUR, .y = 293, .tab = TAB_IMAGE},                  // S_BLUR
 }};
 
 HINSTANCE g_inst = nullptr;
@@ -165,9 +165,24 @@ HWND g_tabs = nullptr;
 int g_curTab = TAB_DETECTION;
 HWND g_lblHelpComp = nullptr;  // "CompThre = ..." help on Detection tab when Component is selected
 
-// The system dialog font -- what native dialogs and the (themed) host use, so our
-// controls match instead of the legacy bitmap "System" font.
+// Modern Segoe UI 10pt -- bigger than the system default (~9pt) for a more
+// modern, less-Win2K feel. Explicitly pick Segoe UI (Vista+; universal on any
+// Win10/11 ShopPC) with CLEARTYPE_QUALITY for crisp subpixel rendering.
+// Falls back to whatever the system gives if the font is somehow missing.
 HFONT create_ui_font() {
+    LOGFONTA lf{};
+    lf.lfHeight = -13;  // ~10pt at 96 dpi (-MulDiv(10, 96, 72) = -13)
+    lf.lfWeight = FW_NORMAL;
+    lf.lfCharSet = DEFAULT_CHARSET;
+    lf.lfOutPrecision = OUT_DEFAULT_PRECIS;
+    lf.lfClipPrecision = CLIP_DEFAULT_PRECIS;
+    lf.lfQuality = CLEARTYPE_QUALITY;
+    lf.lfPitchAndFamily = DEFAULT_PITCH | FF_DONTCARE;
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-array-to-pointer-decay,hicpp-no-array-decay) -- lfFaceName is a fixed-size char array; strncpy with the array length is the canonical fill.
+    std::strncpy(lf.lfFaceName, "Segoe UI", LF_FACESIZE - 1);
+    if (HFONT h = CreateFontIndirectA(&lf); h != nullptr) {
+        return h;
+    }
     NONCLIENTMETRICSA ncm{};
     ncm.cbSize = sizeof ncm;
     if (SystemParametersInfoA(SPI_GETNONCLIENTMETRICS, sizeof ncm, &ncm, 0) != 0) {
@@ -529,7 +544,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 // slots are empty -- nothing to show).
                 g_tabs = CreateWindowExA(0, WC_TABCONTROLA, "",
                                          WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
-                                         8, 84, 404, 240, hwnd,
+                                         8, 84, 404, 268, hwnd,
                                          reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TAB)),
                                          g_inst, nullptr);
                 {
@@ -551,33 +566,36 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 // ---- Sliders + their name/value labels ------------------------
                 // y values come from kDefs (per-tab). Tab assignment too -- the
                 // initial show_tab() at the bottom hides the off-tab ones.
+                // Slider rows: name (left, 100 wide) | trackbar (160 wide) |
+                // value (right, 108 wide). Sized for 10pt Segoe UI so "Exposure
+                // min" labels + "NN px (M.MM mm)" value strings don't truncate.
                 for (std::size_t i = 0; i < kDefs.size(); ++i) {
-                    g_lblName[i] = make_static(hwnd, kDefs[i].label, 24, kDefs[i].y + 2, 90, 18);
+                    g_lblName[i] = make_static(hwnd, kDefs[i].label, 24, kDefs[i].y + 4, 100, 20);
                     g_tb[i] = CreateWindowExA(0, "msctls_trackbar32", "",
                                               WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
-                                              118, kDefs[i].y, 176, 24, hwnd, nullptr, g_inst, nullptr);
+                                              130, kDefs[i].y, 160, 24, hwnd, nullptr, g_inst, nullptr);
                     SendMessageA(g_tb[i], TBM_SETRANGEMIN, FALSE, static_cast<LPARAM>(kDefs[i].lo));
                     SendMessageA(g_tb[i], TBM_SETRANGEMAX, TRUE, static_cast<LPARAM>(kDefs[i].hi));
-                    g_lblVal[i] = make_static(hwnd, "Auto", 300, kDefs[i].y + 2, 100, 18);
+                    g_lblVal[i] = make_static(hwnd, "Auto", 296, kDefs[i].y + 4, 108, 20);
                 }
 
                 // ---- Detection tab: median checkbox + Component help line -----
                 g_chkMedian = CreateWindowExA(0, "BUTTON", "Median ring scoring (robust to glare)",
                                               WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                                              24, 250, 340, 20, hwnd,
+                                              24, 268, 360, 22, hwnd,
                                               reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_CHK_MEDIAN)),
                                               g_inst, nullptr);
                 g_lblHelpComp =
                     make_static(hwnd,
-                                "CompThre in host ParamEdit: 10-100 = manual % of ROI max brightness.\n"
-                                "(0-9 reserved for per-board profile slots; none authored yet.)",
-                                24, 278, 360, 38);
+                                "CompThre 10-100 = manual % of ROI max brightness.\n"
+                                "(0-9 reserved for future per-board profile slots.)",
+                                24, 300, 380, 40);
 
                 // ---- Detector master switches: persistent strip below the tabs.
                 // Global setting (uncheck = fall back to stock vision for that
                 // mode); shown regardless of which tab is selected.
                 make_static(hwnd, "Detectors  (uncheck = use stock vision):",
-                            12, 332, 300, 16);
+                            12, 360, 320, 18);
                 struct ChkDef {
                     int id;
                     int method;
@@ -589,9 +607,9 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     {.id = ID_CHK_TEMPLATE, .method = METHOD_TEMPLATE, .label = "Template"},
                     {.id = ID_CHK_COMP, .method = METHOD_COMP, .label = "Component"},
                 }};
-                constexpr int kChkY = 352;
-                constexpr int kChkW = 90;
-                constexpr int kChkH = 20;
+                constexpr int kChkY = 382;
+                constexpr int kChkW = 96;
+                constexpr int kChkH = 22;
                 for (std::size_t i = 0; i < chk.size(); ++i) {
                     const int x = 12 + static_cast<int>(i) * (kChkW + 8);
                     g_chkMethod[i] = CreateWindowExA(
@@ -606,7 +624,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 constexpr int kBtnW = 80;
                 constexpr int kBtnH = 26;
                 constexpr int kBtnGap = 10;
-                constexpr int kBtnY = 388;
+                constexpr int kBtnY = 416;
                 constexpr int kNBtn = 3;
                 RECT cr{};
                 GetClientRect(hwnd, &cr);
@@ -702,7 +720,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 void create_window() {
     const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
     const DWORD ex = WS_EX_TOPMOST | WS_EX_TOOLWINDOW;
-    RECT wr{0, 0, 420, 430};
+    RECT wr{0, 0, 420, 460};
     AdjustWindowRectEx(&wr, style, FALSE, ex);
     // Activate the v6 context around creation so this window AND the child controls
     // it makes in WM_CREATE render themed.
@@ -745,11 +763,13 @@ void ui_thread() {
     wc.lpfnWndProc = wnd_proc;
     wc.hInstance = g_inst;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    // White window background -- modern flat look (vs Win2K's COLOR_BTNFACE gray).
-    // The tab control's content area is already white by default, so this also
-    // collapses the previous tab-vs-dialog colour split that needed
-    // EnableThemeDialogTexture to paper over.
-    wc.hbrBackground = reinterpret_cast<HBRUSH>(static_cast<INT_PTR>(COLOR_WINDOW + 1));
+    // Pure-white background -- modern flat look. Using GetStockObject(WHITE_BRUSH)
+    // (not COLOR_WINDOW+1, which is the THEMED system window colour: on themed
+    // Windows it's a subtle off-white that doesn't match the tab control's
+    // hard-coded pure-white content area, leaving a visible seam where the dialog
+    // bg meets the tab interior). Stock objects are owned by GDI and never need
+    // to be freed.
+    wc.hbrBackground = static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH));
     wc.lpszClassName = kClassName;
     RegisterClassExA(&wc);
 
