@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 project(MVision LANGUAGES CXX)
 
 option(BUILD_TESTS "Build the offline OpenCV detector test harness (host arch)" OFF)
+option(BUILD_SAA7113_TUNE "Build the SAA7113 USB tuning utility (needs libusb-1.0)" OFF)
 
 # Default to Release for single-config generators (Unix Makefiles, Ninja) when
 # the user hasn't picked one. Without this, an empty CMAKE_BUILD_TYPE means
@@ -197,4 +198,13 @@ else()
     if(MSVC)
         target_compile_options(mvision-tune PRIVATE /Zc:__cplusplus /EHsc /O2)
     endif()
+endif()
+
+# ---------------------------------------------------------------------------
+# saa7113-tune -- standalone USB tuner for the SAA7113 analog decoder on the
+# STK1150 grabber. Off by default because it pulls libusb-1.0 (not needed by
+# the DLL build). Enable with -DBUILD_SAA7113_TUNE=ON.
+# ---------------------------------------------------------------------------
+if(BUILD_SAA7113_TUNE)
+    add_subdirectory(tools/saa7113-tune)
 endif()
