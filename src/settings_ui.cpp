@@ -667,13 +667,33 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             case WM_CTLCOLORSTATIC: {
                 HWND ctl = reinterpret_cast<HWND>(lParam);
+                // Status banner keeps its own coloured bg (green = locked, red = no lock).
                 if (ctl == g_lblStatus) {
                     HDC hdc = reinterpret_cast<HDC>(wParam);
                     SetTextColor(hdc, RGB(255, 255, 255));
                     SetBkColor(hdc, g_lastFound ? RGB(40, 150, 60) : RGB(170, 50, 50));
                     return reinterpret_cast<LRESULT>(g_lastFound ? g_brGreen : g_brRed);
                 }
-                break;
+                // Every other STATIC (slider name labels, value labels, section
+                // headers, the Component help line): transparent so the text
+                // sits directly on whichever bg is behind it -- the dialog
+                // surface (COLOR_BTNFACE) for most labels, the tab control's
+                // own white content area for labels inside the tabs. Without
+                // this each STATIC paints an opaque grey rectangle (its own
+                // default bg) that sticks out as a grey patch on the white
+                // tab interior.
+                HDC hdc = reinterpret_cast<HDC>(wParam);
+                SetBkMode(hdc, TRANSPARENT);
+                return reinterpret_cast<LRESULT>(GetStockObject(HOLLOW_BRUSH));
+            }
+            // BUTTON-class controls (the median + 4 detector master-switch
+            // checkboxes) get the same transparent treatment so their
+            // surrounding focus rect / label area picks up the underlying
+            // panel bg instead of painting a grey square.
+            case WM_CTLCOLORBTN: {
+                HDC hdc = reinterpret_cast<HDC>(wParam);
+                SetBkMode(hdc, TRANSPARENT);
+                return reinterpret_cast<LRESULT>(GetStockObject(HOLLOW_BRUSH));
             }
             case WM_COMMAND: {
                 const int id = LOWORD(wParam);
@@ -763,13 +783,12 @@ void ui_thread() {
     wc.lpfnWndProc = wnd_proc;
     wc.hInstance = g_inst;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    // Pure-white background -- modern flat look. Using GetStockObject(WHITE_BRUSH)
-    // (not COLOR_WINDOW+1, which is the THEMED system window colour: on themed
-    // Windows it's a subtle off-white that doesn't match the tab control's
-    // hard-coded pure-white content area, leaving a visible seam where the dialog
-    // bg meets the tab interior). Stock objects are owned by GDI and never need
-    // to be freed.
-    wc.hbrBackground = static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH));
+    // Standard themed dialog background (COLOR_BTNFACE = host's panel grey).
+    // The tab control's content area paints its own bg; the static labels and
+    // checkboxes are made transparent in WM_CTLCOLORSTATIC / WM_CTLCOLORBTN so
+    // they pick up whichever bg is behind them (panel grey OR tab interior),
+    // instead of each control adding its own opaque rectangle.
+    wc.hbrBackground = reinterpret_cast<HBRUSH>(static_cast<INT_PTR>(COLOR_BTNFACE + 1));
     wc.lpszClassName = kClassName;
     RegisterClassExA(&wc);
 
