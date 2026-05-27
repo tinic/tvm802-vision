@@ -100,6 +100,7 @@ if(_build_dll)
         src/detect_component.cpp
         src/settings.cpp
         src/settings_ui.cpp
+        src/cam_props.cpp
         src/preview.cpp
         src/controller.cpp
         src/thread_pool.cpp
@@ -120,7 +121,7 @@ if(_build_dll)
         # gdi32: preview.cpp uses GDI (StretchDIBits, GetStockObject, ...).
         # ws2_32 + iphlpapi: controller.cpp reads the px/mm scale from the motion
         # controller (TCP), discovering its endpoint via the host's own connection.
-        target_link_libraries(${target} PRIVATE ${OpenCV_LIBS} Threads::Threads kernel32 user32 gdi32 comctl32 uxtheme ws2_32 iphlpapi)
+        target_link_libraries(${target} PRIVATE ${OpenCV_LIBS} Threads::Threads kernel32 user32 gdi32 comctl32 uxtheme ws2_32 iphlpapi strmiids ole32 oleaut32 uuid)
         target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS
                                    MVISION_VERSION="${MVISION_VERSION}")
         target_compile_options(${target} PRIVATE ${MVISION_WARNINGS})

@@ -25,6 +25,7 @@
 
 #include "settings_ui.h"
 
+#include "cam_props.h"  // SAA7113 hw brightness/contrast via DirectShow IAMVideoProcAmp
 #include "capture.h"
 #include "controller.h"
 #include "settings.h"
@@ -116,6 +117,8 @@ enum Idx { S_RMIN,
            S_EXPLO,
            S_EXPHI,
            S_BLUR,
+           S_CAM_BRI,  // SAA7113 hardware brightness via DirectShow IAMVideoProcAmp
+           S_CAM_CON,  // SAA7113 hardware contrast (~= analog gain on the luma signal)
            S_COUNT };
 
 struct SliderDef {
@@ -126,22 +129,26 @@ struct SliderDef {
     Tab tab;  // which tab the slider lives on (show/hide on TCN_SELCHANGE)
 };
 
-// Layout (client 420 x 460). Sliders placed inside the tab control's content
+// Layout (client 420 x 516). Sliders placed inside the tab control's content
 // area (y starts ~125, 28-px row spacing). Detection-tab sliders y=125..237;
-// Image-tab sliders y=125..293.
+// Image-tab sliders y=125..349 (Cam bright + Cam contrast at the top --
+// SAA7113 hardware adjustments PRE-quantisation -- followed by the existing
+// 7 post-capture software-side knobs).
 const std::array<SliderDef, S_COUNT> kDefs = {{
     {.label = "Diameter min", .lo = 0, .hi = 120, .kind = K_PX, .y = 125, .tab = TAB_DETECTION},       // S_RMIN
     {.label = "Diameter max", .lo = 0, .hi = 120, .kind = K_PX, .y = 153, .tab = TAB_DETECTION},       // S_RMAX
     {.label = "Sensitivity", .lo = 0, .hi = 200, .kind = K_SENS, .y = 181, .tab = TAB_DETECTION},      // S_SYM
-    {.label = "Gamma", .lo = 0, .hi = 40, .kind = K_GAMMA, .y = 125, .tab = TAB_IMAGE},                // S_GAMMA
-    {.label = "Brightness", .lo = -128, .hi = 128, .kind = K_SINT, .y = 153, .tab = TAB_IMAGE},        // S_BRI
-    {.label = "Contrast", .lo = 0, .hi = 30, .kind = K_THR, .y = 181, .tab = TAB_IMAGE},               // S_CON
-    {.label = "Black point", .lo = 0, .hi = 128, .kind = K_INT, .y = 209, .tab = TAB_IMAGE},           // S_BLK
-    {.label = "White point", .lo = 0, .hi = 128, .kind = K_INT, .y = 237, .tab = TAB_IMAGE},           // S_WHT
-    {.label = "Sharpen", .lo = -10, .hi = 10, .kind = K_STENTHS, .y = 265, .tab = TAB_IMAGE},          // S_SHP
+    {.label = "Gamma", .lo = 0, .hi = 40, .kind = K_GAMMA, .y = 181, .tab = TAB_IMAGE},                // S_GAMMA
+    {.label = "Brightness", .lo = -128, .hi = 128, .kind = K_SINT, .y = 209, .tab = TAB_IMAGE},        // S_BRI
+    {.label = "Contrast", .lo = 0, .hi = 30, .kind = K_THR, .y = 237, .tab = TAB_IMAGE},               // S_CON
+    {.label = "Black point", .lo = 0, .hi = 128, .kind = K_INT, .y = 265, .tab = TAB_IMAGE},           // S_BLK
+    {.label = "White point", .lo = 0, .hi = 128, .kind = K_INT, .y = 293, .tab = TAB_IMAGE},           // S_WHT
+    {.label = "Sharpen", .lo = -10, .hi = 10, .kind = K_STENTHS, .y = 321, .tab = TAB_IMAGE},          // S_SHP
     {.label = "Exposure min", .lo = 0, .hi = 128, .kind = K_AUTOINT, .y = 209, .tab = TAB_DETECTION},  // S_EXPLO
     {.label = "Exposure max", .lo = 0, .hi = 255, .kind = K_AUTOINT, .y = 237, .tab = TAB_DETECTION},  // S_EXPHI
-    {.label = "Blur", .lo = 0, .hi = 25, .kind = K_BLUR, .y = 293, .tab = TAB_IMAGE},                  // S_BLUR
+    {.label = "Blur", .lo = 0, .hi = 25, .kind = K_BLUR, .y = 349, .tab = TAB_IMAGE},                  // S_BLUR
+    {.label = "Cam bright", .lo = 0, .hi = 255, .kind = K_INT, .y = 125, .tab = TAB_IMAGE},            // S_CAM_BRI
+    {.label = "Cam contrast", .lo = 0, .hi = 127, .kind = K_INT, .y = 153, .tab = TAB_IMAGE},          // S_CAM_CON
 }};
 
 HINSTANCE g_inst = nullptr;
@@ -427,6 +434,13 @@ void apply_from_controls() {
     s.blur = map_to_setting(S_BLUR, tb_pos(S_BLUR));
     s.medianRings = (SendMessageA(g_chkMedian, BM_GETCHECK, 0, 0) == BST_CHECKED) ? 1.0 : 0.0;
     set_settings(g_curMode, s);
+    // SAA7113 hardware sliders bypass the vis::Settings struct -- the value lives
+    // on the chip itself (retained across DLL re-loads), so we just push to the
+    // device on every change. ~50 ms blip per call as the DirectShow Get/Set
+    // chain runs; the chip register update is immediate, the live capture in
+    // SurfaceMount sees the new value on the next frame.
+    set_cam_brightness(tb_pos(S_CAM_BRI));
+    set_cam_contrast(tb_pos(S_CAM_CON));
     refresh_value_labels();
 }
 
@@ -486,6 +500,12 @@ void controls_from_settings() {
     pos[S_EXPLO] = static_cast<int>(std::lround(s.meanLo));
     pos[S_EXPHI] = static_cast<int>(std::lround(s.meanHi));
     pos[S_BLUR] = static_cast<int>(std::lround(s.blur));
+    // Cam Brightness / Cam Contrast come straight from the SAA7113 hardware
+    // (not vis::Settings). Query whatever the chip currently has -- it survives
+    // across DLL re-loads -- so the slider opens at the real device state, not
+    // an INI-saved value that might be stale.
+    pos[S_CAM_BRI] = get_cam_brightness();
+    pos[S_CAM_CON] = get_cam_contrast();
     for (std::size_t i = 0; i < pos.size(); ++i) {
         SendMessageA(g_tb[i], TBM_SETPOS, TRUE, static_cast<LPARAM>(pos[i]));
     }
@@ -581,7 +601,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 // slots are empty -- nothing to show).
                 g_tabs = CreateWindowExA(0, WC_TABCONTROLA, "",
                                          WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
-                                         8, 84, 404, 268, hwnd,
+                                         8, 84, 404, 324, hwnd,
                                          reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TAB)),
                                          g_inst, nullptr);
                 {
@@ -632,7 +652,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 // Global setting (uncheck = fall back to stock vision for that
                 // mode); shown regardless of which tab is selected.
                 make_static(hwnd, "Detectors  (uncheck = use stock vision):",
-                            12, 360, 320, 18);
+                            12, 416, 320, 18);
                 // Per-label widths: the themed BS_AUTOCHECKBOX paints its entire
                 // HWND rect with the system window colour (white) regardless of
                 // what brush we return from WM_CTLCOLORBTN. Sizing each control
@@ -651,7 +671,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     {.id = ID_CHK_TEMPLATE, .method = METHOD_TEMPLATE, .label = "Template", .w = 76},
                     {.id = ID_CHK_COMP, .method = METHOD_COMP, .label = "Component", .w = 86},
                 }};
-                constexpr int kChkY = 382;
+                constexpr int kChkY = 438;
                 constexpr int kChkH = 22;
                 int chkX = 14;
                 constexpr int kChkGap = 14;
@@ -677,7 +697,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 constexpr int kBtnW = 80;
                 constexpr int kBtnH = 26;
                 constexpr int kBtnGap = 10;
-                constexpr int kBtnY = 416;
+                constexpr int kBtnY = 472;
                 constexpr int kNBtn = 3;
                 RECT cr{};
                 GetClientRect(hwnd, &cr);
@@ -784,7 +804,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 void create_window() {
     const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
     const DWORD ex = WS_EX_TOPMOST | WS_EX_TOOLWINDOW;
-    RECT wr{0, 0, 420, 460};
+    RECT wr{0, 0, 420, 516};
     AdjustWindowRectEx(&wr, style, FALSE, ex);
     // Activate the v6 context around creation so this window AND the child controls
     // it makes in WM_CREATE render themed.
