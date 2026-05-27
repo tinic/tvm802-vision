@@ -237,6 +237,31 @@ HWND make_static(HWND parent, const char* text, int x, int y, int w, int h) {
                            nullptr, g_inst, nullptr);
 }
 
+// Pick the right bg brush for a child control based on what's painted behind it:
+//   inside the tab control's content area -> white (the tab interior is white)
+//   anywhere else                          -> COLOR_BTNFACE (the dialog surface)
+// Returned by the WM_CTLCOLOR* handlers so each control erases its rect with
+// the matching colour BEFORE painting its content. Without this, a frequently-
+// updated label (e.g. the slider value strings, refreshed on every
+// WM_HSCROLL) would overdraw old text on top of new -- garbled glyphs in the
+// screenshot. The text itself stays SetBkMode(TRANSPARENT) so it doesn't
+// re-paint a different-colour text bg over the matching erase.
+HBRUSH brush_for_control(HWND ctl) {
+    if (g_tabs == nullptr || ctl == nullptr) {
+        return reinterpret_cast<HBRUSH>(static_cast<INT_PTR>(COLOR_BTNFACE + 1));
+    }
+    RECT cr{};
+    RECT tr{};
+    GetWindowRect(ctl, &cr);
+    GetWindowRect(g_tabs, &tr);
+    // ~22 px past the tab control's top edge skips the tab-strip bar; the rest
+    // of the tab area is the white content surface.
+    if (cr.left >= tr.left && cr.right <= tr.right && cr.top >= tr.top + 22 && cr.bottom <= tr.bottom) {
+        return static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH));
+    }
+    return reinterpret_cast<HBRUSH>(static_cast<INT_PTR>(COLOR_BTNFACE + 1));
+}
+
 // Show the per-tab control set; hide everything else. Cheap (just SW_HIDE /
 // SW_SHOW per control) and runs only on tab-change.
 void show_tab(int tab) {
@@ -674,26 +699,17 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     SetBkColor(hdc, g_lastFound ? RGB(40, 150, 60) : RGB(170, 50, 50));
                     return reinterpret_cast<LRESULT>(g_lastFound ? g_brGreen : g_brRed);
                 }
-                // Every other STATIC (slider name labels, value labels, section
-                // headers, the Component help line): transparent so the text
-                // sits directly on whichever bg is behind it -- the dialog
-                // surface (COLOR_BTNFACE) for most labels, the tab control's
-                // own white content area for labels inside the tabs. Without
-                // this each STATIC paints an opaque grey rectangle (its own
-                // default bg) that sticks out as a grey patch on the white
-                // tab interior.
                 HDC hdc = reinterpret_cast<HDC>(wParam);
                 SetBkMode(hdc, TRANSPARENT);
-                return reinterpret_cast<LRESULT>(GetStockObject(HOLLOW_BRUSH));
+                return reinterpret_cast<LRESULT>(brush_for_control(ctl));
             }
-            // BUTTON-class controls (the median + 4 detector master-switch
-            // checkboxes) get the same transparent treatment so their
-            // surrounding focus rect / label area picks up the underlying
-            // panel bg instead of painting a grey square.
+            // BUTTON-class controls (median + 4 detector master switches) and
+            // trackbars share the same routing: match the bg behind them so
+            // the control's text/box overdraw doesn't leave artefacts.
             case WM_CTLCOLORBTN: {
                 HDC hdc = reinterpret_cast<HDC>(wParam);
                 SetBkMode(hdc, TRANSPARENT);
-                return reinterpret_cast<LRESULT>(GetStockObject(HOLLOW_BRUSH));
+                return reinterpret_cast<LRESULT>(brush_for_control(reinterpret_cast<HWND>(lParam)));
             }
             case WM_COMMAND: {
                 const int id = LOWORD(wParam);
