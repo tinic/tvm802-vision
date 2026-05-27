@@ -27,22 +27,51 @@ so tune-once-and-forget is the intended workflow.
    (interface 0; VID `05E1` PID `0408`), pick **WinUSB** in the target
    driver dropdown, click *Replace Driver*.
 
-## Tuning loop
+## Tuning loop (recommended: live mode)
 
 ```
-saa7113-tune dump                  # confirm communication
-saa7113-tune brightness 144        # 0..255, default 128
-saa7113-tune contrast   80         # 0..127, default 68
-saa7113-tune saturation 64         # 0..127, default 64
-saa7113-tune write 0x09 0x40       # raw, e.g. LCR adjustments
+saa7113-tune live
 ```
 
-To preview the effect:
+Opens a Win32 window showing the live UYVY stream from the SAA7113/STK1160
+over the WinUSB binding. A console REPL accepts tweaks; the effect is
+visible immediately in the preview window. No driver-swap-per-tweak needed:
 
-1. Run Zadig again and restore the **Syntek M811** driver on the same device.
-2. Relaunch `SurfaceMount.exe`. The SAA7113 retains the values you wrote.
-3. If you need to iterate, close `SurfaceMount`, swap back to WinUSB, tune
-   another step, swap back.
+```
+saa7113-tune live
+> b 144         brightness
+> c 80          contrast
+> g 32          manual gain ch1+ch2 (also disables AGC)
+> agc on        AGC back on
+> w 0x09 0x40   raw LCR write
+> d             dump all registers
+> q             quit
+```
+
+When you have values you like, **write them down** -- they're volatile and
+the chip resets to its 24Cxx EEPROM-loaded defaults on USB plug-cycle (and
+the Syntek driver doesn't re-apply our values when you swap back). One
+practical workflow: save the working register set as a small `.bat`:
+
+```
+saa7113-tune brightness 144
+saa7113-tune contrast 80
+saa7113-tune gain 32
+```
+
+and run that batch after each cold boot / plug event.
+
+## One-shot subcommands (no preview)
+
+```
+saa7113-tune dump
+saa7113-tune brightness 144
+saa7113-tune contrast 80
+saa7113-tune write 0x09 0x40
+```
+
+To verify the effect of one-shot writes without `live`: swap Zadig back to
+the Syntek driver and relaunch SurfaceMount.
 
 Once you've found values you like, write them down -- they're in the chip's
 volatile registers and reset when USB Vbus drops. (Plug-cycle or full host
@@ -54,6 +83,7 @@ but at least we now know exactly what defaults the chip has.)
 
 | Command | Meaning |
 |---|---|
+| `live` | **Open live preview window + REPL** (Windows only). Type `help` inside it for REPL commands. |
 | `dump` | Read all 128 SAA7113 registers, print as a hex matrix |
 | `scan` | I²C bus scan (7-bit addresses 0x08..0x77) -- finds the chip |
 | `read REG` | Read one SAA7113 register (REG is decimal or `0xNN`) |
