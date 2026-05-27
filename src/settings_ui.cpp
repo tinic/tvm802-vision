@@ -246,17 +246,22 @@ HWND make_static(HWND parent, const char* text, int x, int y, int w, int h) {
 // WM_HSCROLL) would overdraw old text on top of new -- garbled glyphs in the
 // screenshot. The text itself stays SetBkMode(TRANSPARENT) so it doesn't
 // re-paint a different-colour text bg over the matching erase.
-HBRUSH brush_for_control(HWND ctl) {
-    if (g_tabs == nullptr || ctl == nullptr) {
-        return reinterpret_cast<HBRUSH>(static_cast<INT_PTR>(COLOR_BTNFACE + 1));
+//
+// Membership-check (vs the earlier rect-vs-rect probe): themed visual-styles
+// can extend the tab control's effective drawing region in subtle ways, so a
+// purely geometric check mis-routed controls below the tab strip to "inside".
+// We KNOW which HWNDs live inside the tab at WM_CREATE time -- check the HWND
+// directly against that set and there's no ambiguity.
+bool inside_tab(HWND ctl) {
+    if (ctl == g_chkMedian || ctl == g_lblHelpComp) {
+        return true;
     }
-    RECT cr{};
-    RECT tr{};
-    GetWindowRect(ctl, &cr);
-    GetWindowRect(g_tabs, &tr);
-    // ~22 px past the tab control's top edge skips the tab-strip bar; the rest
-    // of the tab area is the white content surface.
-    if (cr.left >= tr.left && cr.right <= tr.right && cr.top >= tr.top + 22 && cr.bottom <= tr.bottom) {
+    auto eq = [ctl](HWND h) { return h == ctl; };
+    return std::ranges::any_of(g_tb, eq) || std::ranges::any_of(g_lblName, eq) || std::ranges::any_of(g_lblVal, eq);
+}
+
+HBRUSH brush_for_control(HWND ctl) {
+    if (ctl != nullptr && inside_tab(ctl)) {
         return static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH));
     }
     return reinterpret_cast<HBRUSH>(static_cast<INT_PTR>(COLOR_BTNFACE + 1));
