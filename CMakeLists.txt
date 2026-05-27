@@ -92,7 +92,11 @@ function(find_mvision_libusb)
         "On Windows (vcpkg): add 'libusb' to vcpkg.json. "
         "Or pass -DLIBUSB_INCLUDE_DIR + -DLIBUSB_LIBRARY directly.")
 endfunction()
-find_mvision_libusb()
+# Only resolve libusb when a target that actually needs it will be built.
+# Linux x64 lint job (no DLL, no tools enabled) doesn't need libusb at all.
+if(_build_dll OR BUILD_SAA7113_TUNE OR BUILD_MVISION_GRABBER)
+    find_mvision_libusb()
+endif()
 
 # Threads: the circular-symmetry detector parallelizes its coarse search across
 # cores (std::thread). On Windows this is a no-op; on POSIX it links pthread.
