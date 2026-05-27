@@ -21,7 +21,9 @@
 //   - memory: reference_stk1150_capture_surface
 
 #define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX  // also set on the cmake target via target_compile_definitions
 #define NOMINMAX  // keep windows.h from defining min/max macros
+#endif
 #define INITGUID
 // winsock2.h must come BEFORE windows.h. We don't actually use winsock, but
 // libusb.h declares libusb_handle_events_timeout_completed with `struct

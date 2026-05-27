@@ -30,18 +30,21 @@
 //   main thread copies from the "front" buffer at paint time.
 //   libusb_control_transfer is thread-safe.
 
+// Windows headers MUST come first, BEFORE common.h/live.h/libusb.h. libusb's
+// header pulls in <windows.h> unconditionally (no WIN32_LEAN_AND_MEAN), which
+// then pulls in the legacy <winsock.h>. If we later include <winsock2.h>
+// (needed for `struct timeval` that libusb_handle_events_timeout_completed
+// uses) we collide with the already-loaded winsock.h: dozens of C2375
+// "different linkage" errors on sendto / setsockopt / etc.
+#define WIN32_LEAN_AND_MEAN  // suppress winsock.h from windows.h
+#define NOMINMAX             // keep windows.h from defining min/max macros
+#include <winsock2.h>        // must come before windows.h; provides `struct timeval`
+#include <windows.h>
+
 #include "live.h"
 #include "common.h"
 
 #include <libusb.h>
-
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX  // MSVC: keep <windows.h> from defining min/max macros that collide with std::min/max
-// winsock2.h before windows.h: libusb.h's libusb_handle_events_timeout_completed
-// uses `struct timeval`, which on MSVC lives in winsock2.h (mingw pulls it in
-// transitively via sys/time.h, which is why the cross-syntax-check passed).
-#include <winsock2.h>
-#include <windows.h>
 
 #include <algorithm>
 #include <array>
