@@ -35,10 +35,18 @@
 #include <ksproxy.h>
 #include <dvdmedia.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
+#include <thread>
+#include <vector>
+
+// Shared WinUSB + STK1160 I2C-master code from the saa7113-tune tool.
+// The build script flattens both source trees into the build directory.
+#include "common.h"
 
 // ---------------------------------------------------------------------------
 // CLSID for our filter. Generated 2026-05-27, dedicated to this project --
@@ -72,6 +80,188 @@ HINSTANCE g_hInst = nullptr;
 
 class CMVisionGrabberFilter;
 HRESULT CreateInstance(IUnknown* pUnkOuter, REFIID riid, void** ppv);
+
+// =========================================================================
+// Tiny enumerator helpers -- IEnumPins (one entry) and IEnumMediaTypes
+// (one entry). DirectShow contract requires these to be Reset()/Skip()/
+// Clone()-able; we implement the minimum.
+// =========================================================================
+
+template <typename TIface, typename TItem>
+class CSingleEnum final : public TIface {
+    std::atomic<LONG> m_ref{1};
+    TItem m_item;
+    ULONG m_pos = 0;  // 0 = not yet emitted, 1 = emitted
+    void item_addref() {
+        if constexpr (std::is_same_v<TItem, IPin*>) {
+            if (m_item) m_item->AddRef();
+        }
+    }
+    void item_release() {
+        if constexpr (std::is_same_v<TItem, IPin*>) {
+            if (m_item) m_item->Release();
+        }
+    }
+
+   public:
+    explicit CSingleEnum(TItem item) : m_item(item) { item_addref(); }
+    ~CSingleEnum() { item_release(); }
+
+    STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
+        if (!ppv) return E_POINTER;
+        if (riid == IID_IUnknown || riid == __uuidof(TIface)) {
+            *ppv = static_cast<TIface*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+    STDMETHODIMP_(ULONG) AddRef() override { return ULONG(++m_ref); }
+    STDMETHODIMP_(ULONG) Release() override {
+        LONG r = --m_ref;
+        if (r == 0) delete this;
+        return ULONG(r);
+    }
+    STDMETHODIMP Reset() override { m_pos = 0; return S_OK; }
+    STDMETHODIMP Skip(ULONG cElt) override {
+        if (m_pos + cElt > 1) { m_pos = 1; return S_FALSE; }
+        m_pos += cElt;
+        return S_OK;
+    }
+    STDMETHODIMP Clone(TIface** ppEnum) override {
+        if (!ppEnum) return E_POINTER;
+        auto* c = new CSingleEnum(m_item);
+        c->m_pos = m_pos;
+        *ppEnum = c;
+        return S_OK;
+    }
+};
+
+// CEnumPins: holds a strong ref to the single IPin, emits it once.
+class CEnumPins final : public IEnumPins {
+    std::atomic<LONG> m_ref{1};
+    IPin* m_pPin = nullptr;
+    ULONG m_pos = 0;
+   public:
+    explicit CEnumPins(IPin* p) : m_pPin(p) { if (m_pPin) m_pPin->AddRef(); }
+    ~CEnumPins() { if (m_pPin) m_pPin->Release(); }
+    STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
+        if (!ppv) return E_POINTER;
+        if (riid == IID_IUnknown || riid == IID_IEnumPins) {
+            *ppv = static_cast<IEnumPins*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+    STDMETHODIMP_(ULONG) AddRef() override { return ULONG(++m_ref); }
+    STDMETHODIMP_(ULONG) Release() override {
+        LONG r = --m_ref;
+        if (r == 0) delete this;
+        return ULONG(r);
+    }
+    STDMETHODIMP Next(ULONG cPins, IPin** ppPins, ULONG* pcFetched) override {
+        if (!ppPins) return E_POINTER;
+        ULONG fetched = 0;
+        if (m_pos == 0 && cPins >= 1 && m_pPin) {
+            m_pPin->AddRef();
+            ppPins[0] = m_pPin;
+            m_pos = 1;
+            fetched = 1;
+        }
+        if (pcFetched) *pcFetched = fetched;
+        return fetched == cPins ? S_OK : S_FALSE;
+    }
+    STDMETHODIMP Skip(ULONG cPins) override {
+        if (m_pos + cPins > 1) { m_pos = 1; return S_FALSE; }
+        m_pos += cPins;
+        return S_OK;
+    }
+    STDMETHODIMP Reset() override { m_pos = 0; return S_OK; }
+    STDMETHODIMP Clone(IEnumPins** ppEnum) override {
+        if (!ppEnum) return E_POINTER;
+        auto* c = new CEnumPins(m_pPin);
+        c->m_pos = m_pos;
+        *ppEnum = c;
+        return S_OK;
+    }
+};
+
+// Forward decl for set_default_format -- used by CEnumMediaTypes.
+void make_default_media_type(AM_MEDIA_TYPE* mt);
+
+class CEnumMediaTypes final : public IEnumMediaTypes {
+    std::atomic<LONG> m_ref{1};
+    ULONG m_pos = 0;
+   public:
+    STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
+        if (!ppv) return E_POINTER;
+        if (riid == IID_IUnknown || riid == IID_IEnumMediaTypes) {
+            *ppv = static_cast<IEnumMediaTypes*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+    STDMETHODIMP_(ULONG) AddRef() override { return ULONG(++m_ref); }
+    STDMETHODIMP_(ULONG) Release() override {
+        LONG r = --m_ref;
+        if (r == 0) delete this;
+        return ULONG(r);
+    }
+    STDMETHODIMP Next(ULONG cMediaTypes, AM_MEDIA_TYPE** ppMediaTypes,
+                      ULONG* pcFetched) override {
+        if (!ppMediaTypes) return E_POINTER;
+        ULONG fetched = 0;
+        if (m_pos == 0 && cMediaTypes >= 1) {
+            auto* mt = static_cast<AM_MEDIA_TYPE*>(CoTaskMemAlloc(sizeof(AM_MEDIA_TYPE)));
+            make_default_media_type(mt);
+            ppMediaTypes[0] = mt;
+            m_pos = 1;
+            fetched = 1;
+        }
+        if (pcFetched) *pcFetched = fetched;
+        return fetched == cMediaTypes ? S_OK : S_FALSE;
+    }
+    STDMETHODIMP Skip(ULONG cMediaTypes) override {
+        if (m_pos + cMediaTypes > 1) { m_pos = 1; return S_FALSE; }
+        m_pos += cMediaTypes;
+        return S_OK;
+    }
+    STDMETHODIMP Reset() override { m_pos = 0; return S_OK; }
+    STDMETHODIMP Clone(IEnumMediaTypes** ppEnum) override {
+        if (!ppEnum) return E_POINTER;
+        auto* c = new CEnumMediaTypes();
+        c->m_pos = m_pos;
+        *ppEnum = c;
+        return S_OK;
+    }
+};
+
+void make_default_media_type(AM_MEDIA_TYPE* mt) {
+    std::memset(mt, 0, sizeof(*mt));
+    mt->majortype = MEDIATYPE_Video;
+    mt->subtype = MEDIASUBTYPE_UYVY;
+    mt->bFixedSizeSamples = TRUE;
+    mt->bTemporalCompression = FALSE;
+    mt->lSampleSize = 640 * 480 * 2;
+    mt->formattype = FORMAT_VideoInfo;
+    mt->cbFormat = sizeof(VIDEOINFOHEADER);
+    auto* vih = static_cast<VIDEOINFOHEADER*>(CoTaskMemAlloc(sizeof(VIDEOINFOHEADER)));
+    std::memset(vih, 0, sizeof(*vih));
+    vih->AvgTimePerFrame = 333667;  // ~30 fps
+    vih->bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    vih->bmiHeader.biWidth = 640;
+    vih->bmiHeader.biHeight = 480;
+    vih->bmiHeader.biPlanes = 1;
+    vih->bmiHeader.biBitCount = 16;
+    vih->bmiHeader.biCompression = MAKEFOURCC('U', 'Y', 'V', 'Y');
+    vih->bmiHeader.biSizeImage = 640 * 480 * 2;
+    mt->pbFormat = reinterpret_cast<BYTE*>(vih);
+}
 
 class CClassFactory final : public IClassFactory {
     std::atomic<LONG> m_ref{1};
@@ -112,6 +302,13 @@ class CClassFactory final : public IClassFactory {
 // and be a connectable capture pin. Streaming Receive() flow is TODO.
 // =========================================================================
 
+// Free a media type's allocated pointers in place (does NOT free the struct).
+inline void free_media_type(AM_MEDIA_TYPE* mt) {
+    if (mt->pbFormat) { CoTaskMemFree(mt->pbFormat); mt->pbFormat = nullptr; }
+    if (mt->pUnk)     { mt->pUnk->Release();          mt->pUnk = nullptr; }
+    mt->cbFormat = 0;
+}
+
 class CCaptureOutputPin final : public IPin,
                                 public IAMStreamConfig,
                                 public IKsPropertySet,
@@ -119,46 +316,25 @@ class CCaptureOutputPin final : public IPin,
     std::atomic<LONG> m_ref{1};
     IBaseFilter* m_pFilter = nullptr;          // owner; weak ref
     IPin* m_pConnected = nullptr;              // downstream; strong ref
+    IMemInputPin* m_pInput = nullptr;          // downstream's IMemInputPin
+    IMemAllocator* m_pAllocator = nullptr;     // negotiated allocator
     AM_MEDIA_TYPE m_mtCurrent{};               // currently negotiated format
     BOOL m_bFormatSet = FALSE;
 
    public:
     explicit CCaptureOutputPin(IBaseFilter* pFilter) : m_pFilter(pFilter) {
-        set_default_format(&m_mtCurrent);
+        make_default_media_type(&m_mtCurrent);
     }
     ~CCaptureOutputPin() {
+        if (m_pAllocator) m_pAllocator->Release();
+        if (m_pInput) m_pInput->Release();
         if (m_pConnected) m_pConnected->Release();
         free_media_type(&m_mtCurrent);
     }
 
-    // Format default: UYVY 640x480 30 fps. SurfaceMount sets w/h via
-    // IAMStreamConfig::SetFormat to 640x480 (per memory reference_stk1150_*).
-    static void set_default_format(AM_MEDIA_TYPE* mt) {
-        std::memset(mt, 0, sizeof(*mt));
-        mt->majortype = MEDIATYPE_Video;
-        mt->subtype = MEDIASUBTYPE_UYVY;
-        mt->bFixedSizeSamples = TRUE;
-        mt->bTemporalCompression = FALSE;
-        mt->lSampleSize = 640 * 480 * 2;
-        mt->formattype = FORMAT_VideoInfo;
-        mt->cbFormat = sizeof(VIDEOINFOHEADER);
-        auto* vih = static_cast<VIDEOINFOHEADER*>(CoTaskMemAlloc(sizeof(VIDEOINFOHEADER)));
-        std::memset(vih, 0, sizeof(*vih));
-        vih->AvgTimePerFrame = 333667;  // 100ns units, ~30 fps
-        vih->bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-        vih->bmiHeader.biWidth = 640;
-        vih->bmiHeader.biHeight = 480;
-        vih->bmiHeader.biPlanes = 1;
-        vih->bmiHeader.biBitCount = 16;
-        vih->bmiHeader.biCompression = MAKEFOURCC('U', 'Y', 'V', 'Y');
-        vih->bmiHeader.biSizeImage = 640 * 480 * 2;
-        mt->pbFormat = reinterpret_cast<BYTE*>(vih);
-    }
-    static void free_media_type(AM_MEDIA_TYPE* mt) {
-        if (mt->pbFormat) { CoTaskMemFree(mt->pbFormat); mt->pbFormat = nullptr; }
-        if (mt->pUnk)     { mt->pUnk->Release();          mt->pUnk = nullptr; }
-        mt->cbFormat = 0;
-    }
+    IMemInputPin* connected_input() const { return m_pInput; }
+    IMemAllocator* connected_allocator() const { return m_pAllocator; }
+    const AM_MEDIA_TYPE& current_format() const { return m_mtCurrent; }
 
     // IUnknown ------------------------------------------------------------
     STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
@@ -191,14 +367,60 @@ class CCaptureOutputPin final : public IPin,
         AM_MEDIA_TYPE mt = pmt ? *pmt : m_mtCurrent;
         HRESULT hr = pReceivePin->ReceiveConnection(this, &mt);
         if (FAILED(hr)) return hr;
+
+        // Get downstream IMemInputPin for sample delivery.
+        IMemInputPin* pIn = nullptr;
+        hr = pReceivePin->QueryInterface(IID_IMemInputPin,
+                                         reinterpret_cast<void**>(&pIn));
+        if (FAILED(hr)) {
+            pReceivePin->Disconnect();
+            return hr;
+        }
+
+        // Negotiate the allocator. Try downstream's first; if it refuses to
+        // provide one, create the system memory allocator ourselves.
+        IMemAllocator* pAlloc = nullptr;
+        if (FAILED(pIn->GetAllocator(&pAlloc))) {
+            CoCreateInstance(CLSID_MemoryAllocator, nullptr, CLSCTX_INPROC_SERVER,
+                             IID_IMemAllocator, reinterpret_cast<void**>(&pAlloc));
+        }
+        if (!pAlloc) {
+            pIn->Release();
+            pReceivePin->Disconnect();
+            return E_FAIL;
+        }
+        ALLOCATOR_PROPERTIES req{};
+        req.cBuffers = 4;
+        req.cbBuffer = 640 * 480 * 2;
+        req.cbAlign = 1;
+        req.cbPrefix = 0;
+        ALLOCATOR_PROPERTIES got{};
+        hr = pAlloc->SetProperties(&req, &got);
+        if (SUCCEEDED(hr)) hr = pIn->NotifyAllocator(pAlloc, FALSE);
+        if (SUCCEEDED(hr)) hr = pAlloc->Commit();
+        if (FAILED(hr)) {
+            pAlloc->Release();
+            pIn->Release();
+            pReceivePin->Disconnect();
+            return hr;
+        }
+
         m_pConnected = pReceivePin;
         m_pConnected->AddRef();
+        m_pInput = pIn;            // ownership transferred
+        m_pAllocator = pAlloc;     // ownership transferred
         return S_OK;
     }
     STDMETHODIMP ReceiveConnection(IPin*, const AM_MEDIA_TYPE*) override {
         return E_UNEXPECTED;  // we're an output pin
     }
     STDMETHODIMP Disconnect() override {
+        if (m_pAllocator) {
+            m_pAllocator->Decommit();
+            m_pAllocator->Release();
+            m_pAllocator = nullptr;
+        }
+        if (m_pInput) { m_pInput->Release(); m_pInput = nullptr; }
         if (m_pConnected) { m_pConnected->Release(); m_pConnected = nullptr; }
         return S_OK;
     }
@@ -243,9 +465,10 @@ class CCaptureOutputPin final : public IPin,
         return (pmt->majortype == MEDIATYPE_Video && pmt->subtype == MEDIASUBTYPE_UYVY)
                    ? S_OK : S_FALSE;
     }
-    STDMETHODIMP EnumMediaTypes(IEnumMediaTypes** /*ppEnum*/) override {
-        // TODO: enumerate UYVY 640x480 + any other formats we advertise.
-        return E_NOTIMPL;
+    STDMETHODIMP EnumMediaTypes(IEnumMediaTypes** ppEnum) override {
+        if (!ppEnum) return E_POINTER;
+        *ppEnum = new CEnumMediaTypes();
+        return S_OK;
     }
     STDMETHODIMP QueryInternalConnections(IPin**, ULONG*) override { return E_NOTIMPL; }
     STDMETHODIMP EndOfStream() override { return S_OK; }
@@ -289,7 +512,7 @@ class CCaptureOutputPin final : public IPin,
         if (!ppmt || !pSCC) return E_POINTER;
         if (iIndex != 0) return S_FALSE;
         *ppmt = static_cast<AM_MEDIA_TYPE*>(CoTaskMemAlloc(sizeof(AM_MEDIA_TYPE)));
-        set_default_format(*ppmt);
+        make_default_media_type(*ppmt);
         auto* scc = reinterpret_cast<VIDEO_STREAM_CONFIG_CAPS*>(pSCC);
         std::memset(scc, 0, sizeof(*scc));
         scc->guid = FORMAT_VideoInfo;
@@ -335,6 +558,12 @@ class CCaptureOutputPin final : public IPin,
 // negotiation and downstream connection.
 // =========================================================================
 
+// =========================================================================
+// Filter: owns the worker thread + the WinUSB capture state. The pin is
+// just for graph negotiation; samples flow from the worker through the
+// pin's allocator/IMemInputPin to downstream.
+// =========================================================================
+
 class CMVisionGrabberFilter final : public IBaseFilter, public IAMVideoProcAmp {
     std::atomic<LONG> m_ref{1};
     CCaptureOutputPin* m_pPin = nullptr;
@@ -344,11 +573,40 @@ class CMVisionGrabberFilter final : public IBaseFilter, public IAMVideoProcAmp {
     REFERENCE_TIME m_tStart = 0;
     WCHAR m_wszName[MAX_FILTER_NAME] = {0};
 
+    // ---- WinUSB capture state (worker thread) ---------------------------
+    std::thread m_capThread;
+    std::atomic<bool> m_capRun{false};
+    std::mutex m_usbMu;                // guards usb access from
+                                        // IAMVideoProcAmp + worker
+    saa::UsbCtx m_usb;                 // opened on first Run(), released
+                                        // in Stop()/dtor
+    bool m_usbOpen = false;
+    REFERENCE_TIME m_streamStart = 0;  // sample time origin (from Run())
+
+    // Frame-assembly state. Chip emits BOTH 0xc0 (odd field + frame start)
+    // and 0x80 (even field) markers; we accumulate two interleaved fields
+    // into a 720x480 buffer per the Linux stk1160-video.c convention.
+    static constexpr int kSrcW = 720;
+    static constexpr int kSrcH = 480;          // interleaved frame
+    static constexpr int kSrcBpl = kSrcW * 2;  // UYVY
+    std::vector<std::uint8_t> m_assembly;      // 720x480 UYVY accumulator
+    int m_asmPos = 0;
+    bool m_asmOdd = true;                      // current field parity
+    REFERENCE_TIME m_frameInterval = 333667;   // 100ns units; ~30 fps
+
+    // libusb isoc context.
+    static constexpr std::uint8_t kEpVideo = 0x82;
+    static constexpr int kNumXfers = 8;
+    static constexpr int kNumPkts  = 64;
+    int m_isocMaxPkt = 0;
+
    public:
     CMVisionGrabberFilter() {
         m_pPin = new CCaptureOutputPin(this);
+        m_assembly.assign(std::size_t(kSrcBpl * kSrcH), 0);
     }
     ~CMVisionGrabberFilter() {
+        stop_worker();
         if (m_pPin) m_pPin->Release();
         if (m_pClock) m_pClock->Release();
     }
@@ -382,18 +640,22 @@ class CMVisionGrabberFilter final : public IBaseFilter, public IAMVideoProcAmp {
     }
     // IMediaFilter --------------------------------------------------------
     STDMETHODIMP Stop() override {
+        stop_worker();
         m_state = State_Stopped;
-        // TODO: stop worker thread, cancel isoc URBs.
         return S_OK;
     }
     STDMETHODIMP Pause() override {
+        // DirectShow contract: Pause = "ready to deliver"; for a live
+        // source we typically start running here so the first frame is
+        // available when Run() flips the play state.
+        if (m_state == State_Stopped) start_worker();
         m_state = State_Paused;
         return S_OK;
     }
     STDMETHODIMP Run(REFERENCE_TIME tStart) override {
+        if (m_state == State_Stopped) start_worker();
+        m_streamStart = tStart;
         m_state = State_Running;
-        m_tStart = tStart;
-        // TODO: kick worker thread; samples start flowing via the pin.
         return S_OK;
     }
     STDMETHODIMP GetState(DWORD, FILTER_STATE* State) override {
@@ -414,9 +676,10 @@ class CMVisionGrabberFilter final : public IBaseFilter, public IAMVideoProcAmp {
         return S_OK;
     }
     // IBaseFilter ---------------------------------------------------------
-    STDMETHODIMP EnumPins(IEnumPins** /*ppEnum*/) override {
-        // TODO: return an IEnumPins enumerator over [m_pPin].
-        return E_NOTIMPL;
+    STDMETHODIMP EnumPins(IEnumPins** ppEnum) override {
+        if (!ppEnum) return E_POINTER;
+        *ppEnum = new CEnumPins(static_cast<IPin*>(m_pPin));
+        return S_OK;
     }
     STDMETHODIMP FindPin(LPCWSTR Id, IPin** ppPin) override {
         if (!Id || !ppPin) return E_POINTER;
@@ -473,15 +736,274 @@ class CMVisionGrabberFilter final : public IBaseFilter, public IAMVideoProcAmp {
             default: return E_PROP_ID_UNSUPPORTED;
         }
     }
-    STDMETHODIMP Set(LONG /*Property*/, LONG /*lValue*/, LONG /*Flags*/) override {
-        // TODO: route to SAA7113 register write via the shared common.cpp.
-        return E_NOTIMPL;
+    STDMETHODIMP Set(LONG Property, LONG lValue, LONG /*Flags*/) override {
+        // Hardware-real: every standard IAMVideoProcAmp property maps to a
+        // SAA7113 register (Brightness=0x0A, Contrast=0x0B, Saturation=0x0C,
+        // Hue=0x0D). Gain is the 9-bit GAI18:GAI10/GAI28:GAI20 split with
+        // GAFIX in reg 0x03 bit 2.
+        std::lock_guard lk(m_usbMu);
+        if (!ensure_usb_open()) return E_FAIL;
+        const std::uint8_t addr = saa::kSaaDefaultAddr;
+        auto h = m_usb.h;
+        switch (Property) {
+            case VideoProcAmp_Brightness:
+                return saa::saa_write(h, addr, saa::kSaaBrightness,
+                                      std::uint8_t(std::clamp<LONG>(lValue, 0, 255))) >= 0
+                           ? S_OK : E_FAIL;
+            case VideoProcAmp_Contrast:
+                return saa::saa_write(h, addr, saa::kSaaContrast,
+                                      std::uint8_t(std::clamp<LONG>(lValue, 0, 127))) >= 0
+                           ? S_OK : E_FAIL;
+            case VideoProcAmp_Saturation:
+                return saa::saa_write(h, addr, saa::kSaaSaturation,
+                                      std::uint8_t(std::clamp<LONG>(lValue, 0, 127))) >= 0
+                           ? S_OK : E_FAIL;
+            case VideoProcAmp_Hue:
+                return saa::saa_write(h, addr, saa::kSaaHue,
+                                      std::uint8_t(std::clamp<LONG>(lValue, -128, 127))) >= 0
+                           ? S_OK : E_FAIL;
+            case VideoProcAmp_Gain: {
+                LONG g = std::clamp<LONG>(lValue, 0, 511);
+                std::uint8_t cur = 0;
+                if (saa::saa_read(h, addr, saa::kSaaInputCntl2, cur) < 0) return E_FAIL;
+                std::uint8_t nv = std::uint8_t(
+                    (cur & ~(saa::kSaaGafix | saa::kSaaGai18 | saa::kSaaGai28))
+                    | saa::kSaaGafix
+                    | ((g & 0x100) ? saa::kSaaGai18 : 0)
+                    | ((g & 0x100) ? saa::kSaaGai28 : 0));
+                if (saa::saa_write(h, addr, saa::kSaaInputCntl2, nv) < 0) return E_FAIL;
+                if (saa::saa_write(h, addr, saa::kSaaGainCh1Lo, std::uint8_t(g & 0xff)) < 0) return E_FAIL;
+                if (saa::saa_write(h, addr, saa::kSaaGainCh2Lo, std::uint8_t(g & 0xff)) < 0) return E_FAIL;
+                return S_OK;
+            }
+            default:
+                return E_PROP_ID_UNSUPPORTED;
+        }
     }
-    STDMETHODIMP Get(LONG /*Property*/, LONG* /*lValue*/, LONG* /*Flags*/) override {
-        // TODO: route to SAA7113 register read.
-        return E_NOTIMPL;
+    STDMETHODIMP Get(LONG Property, LONG* lValue, LONG* Flags) override {
+        if (!lValue) return E_POINTER;
+        std::lock_guard lk(m_usbMu);
+        if (!ensure_usb_open()) return E_FAIL;
+        const std::uint8_t addr = saa::kSaaDefaultAddr;
+        auto h = m_usb.h;
+        std::uint8_t v = 0;
+        std::uint8_t reg = 0;
+        switch (Property) {
+            case VideoProcAmp_Brightness: reg = saa::kSaaBrightness; break;
+            case VideoProcAmp_Contrast:   reg = saa::kSaaContrast;   break;
+            case VideoProcAmp_Saturation: reg = saa::kSaaSaturation; break;
+            case VideoProcAmp_Hue:        reg = saa::kSaaHue;        break;
+            case VideoProcAmp_Gain: {
+                std::uint8_t inp2 = 0;
+                std::uint8_t lo = 0;
+                if (saa::saa_read(h, addr, saa::kSaaInputCntl2, inp2) < 0) return E_FAIL;
+                if (saa::saa_read(h, addr, saa::kSaaGainCh1Lo, lo)    < 0) return E_FAIL;
+                *lValue = lo | ((inp2 & saa::kSaaGai18) ? 0x100 : 0);
+                if (Flags) *Flags = (inp2 & saa::kSaaGafix) ? VideoProcAmp_Flags_Manual
+                                                            : VideoProcAmp_Flags_Auto;
+                return S_OK;
+            }
+            default: return E_PROP_ID_UNSUPPORTED;
+        }
+        if (saa::saa_read(h, addr, reg, v) < 0) return E_FAIL;
+        *lValue = (Property == VideoProcAmp_Hue) ? LONG(int8_t(v)) : LONG(v);
+        if (Flags) *Flags = VideoProcAmp_Flags_Manual;
+        return S_OK;
+    }
+
+   private:
+    // ---- worker thread + USB capture ------------------------------------
+    bool ensure_usb_open() {
+        if (m_usbOpen) return true;
+        if (saa::open_device(m_usb) < 0) return false;
+        // Set the alt setting on interface 0 to the isoc-bandwidth one
+        // (alt 5 on this chip; same as saa7113-tune live mode). Use the
+        // raw SET_INTERFACE control transfer -- libusb's
+        // set_interface_alt_setting is fussy on per-interface composite
+        // WinUSB bindings; raw works everywhere.
+        // Pick alt setting by walking the config descriptor.
+        int alt = -1;
+        libusb_device* dev = libusb_get_device(m_usb.h);
+        libusb_config_descriptor* cfg = nullptr;
+        if (libusb_get_active_config_descriptor(dev, &cfg) == 0 && cfg) {
+            for (int ii = 0; ii < cfg->bNumInterfaces && alt < 0; ++ii) {
+                const auto& intf = cfg->interface[ii];
+                for (int a = 0; a < intf.num_altsetting; ++a) {
+                    const auto& as = intf.altsetting[a];
+                    for (int e = 0; e < as.bNumEndpoints; ++e) {
+                        const auto& ep = as.endpoint[e];
+                        if (ep.bEndpointAddress != kEpVideo) continue;
+                        int sz = (ep.wMaxPacketSize & 0x07ff) *
+                                 (((ep.wMaxPacketSize >> 11) & 0x3) + 1);
+                        if (sz > m_isocMaxPkt) {
+                            m_isocMaxPkt = sz;
+                            alt = as.bAlternateSetting;
+                        }
+                    }
+                }
+            }
+            libusb_free_config_descriptor(cfg);
+        }
+        if (alt < 0) return false;
+        libusb_claim_interface(m_usb.h, 0);
+        libusb_control_transfer(m_usb.h, 0x01, 0x0B, std::uint16_t(alt), 0,
+                                nullptr, 0, 1000);
+        // Capture-window registers (NTSC 720x480, same as saa7113-tune).
+        struct RV { std::uint16_t r; std::uint8_t v; };
+        const RV cap[] = {
+            {0x110, 0x00}, {0x111, 0x00}, {0x112, 0x03}, {0x113, 0x00},
+            {0x114, 0xa0}, {0x115, 0x05}, {0x116, 0xf3}, {0x117, 0x00},
+        };
+        for (auto& rv : cap) saa::stk_write_reg(m_usb.h, rv.r, rv.v);
+        m_usbOpen = true;
+        return true;
+    }
+
+    void start_worker() {
+        {
+            std::lock_guard lk(m_usbMu);
+            if (!ensure_usb_open()) return;
+        }
+        m_capRun.store(true);
+        m_capThread = std::thread([this] { capture_loop(); });
+    }
+    void stop_worker() {
+        m_capRun.store(false);
+        if (m_capThread.joinable()) m_capThread.join();
+        // Don't close USB here -- IAMVideoProcAmp may still use it.
+    }
+
+    // Isoc callback: receives packets, calls into process_packet via
+    // user_data = this.
+    static void LIBUSB_CALL on_isoc(libusb_transfer* xfer);
+    void process_packet(const std::uint8_t* p, int len);
+    void deliver_frame();
+
+    // Capture loop: submits isoc URBs, kicks streaming, pumps events.
+    void capture_loop() {
+        std::vector<libusb_transfer*> xfers(kNumXfers, nullptr);
+        std::vector<std::vector<std::uint8_t>> bufs(kNumXfers);
+        for (int i = 0; i < kNumXfers; ++i) {
+            xfers[i] = libusb_alloc_transfer(kNumPkts);
+            bufs[i].assign(std::size_t(kNumPkts * m_isocMaxPkt), 0);
+            libusb_fill_iso_transfer(xfers[i], m_usb.h, kEpVideo,
+                                     bufs[i].data(), int(bufs[i].size()),
+                                     kNumPkts, &CMVisionGrabberFilter::on_isoc,
+                                     this, 1000);
+            libusb_set_iso_packet_lengths(xfers[i], std::uint32_t(m_isocMaxPkt));
+            libusb_submit_transfer(xfers[i]);
+        }
+        // Kick streaming AFTER URBs are pending.
+        saa::stk_write_reg(m_usb.h, 0x100, 0xb3);
+        saa::stk_write_reg(m_usb.h, 0x103, 0x00);
+
+        while (m_capRun.load()) {
+            timeval tv{0, 50000};
+            libusb_handle_events_timeout_completed(nullptr, &tv, nullptr);
+        }
+
+        for (auto* x : xfers) if (x) libusb_cancel_transfer(x);
+        timeval tv{0, 500000};
+        libusb_handle_events_timeout_completed(nullptr, &tv, nullptr);
+        for (auto* x : xfers) if (x) libusb_free_transfer(x);
     }
 };
+
+void CMVisionGrabberFilter::on_isoc(libusb_transfer* xfer) {
+    auto* self = static_cast<CMVisionGrabberFilter*>(xfer->user_data);
+    if (xfer->status == LIBUSB_TRANSFER_CANCELLED ||
+        xfer->status == LIBUSB_TRANSFER_NO_DEVICE) return;
+    for (int i = 0; i < xfer->num_iso_packets; ++i) {
+        auto& d = xfer->iso_packet_desc[i];
+        if (d.status != LIBUSB_TRANSFER_COMPLETED) continue;
+        const std::uint8_t* p =
+            libusb_get_iso_packet_buffer_simple(xfer, std::uint32_t(i));
+        self->process_packet(p, int(d.actual_length));
+    }
+    if (self->m_capRun.load()) libusb_submit_transfer(xfer);
+}
+
+void CMVisionGrabberFilter::process_packet(const std::uint8_t* p, int len) {
+    if (len <= 4) return;
+    if (p[0] == 0xc0) {
+        // 0xc0 = end-of-frame + start of odd field for the next one.
+        deliver_frame();
+        m_asmPos = 0;
+        m_asmOdd = (p[0] & 0x40) != 0;
+        return;
+    }
+    if (p[0] == 0x80) {
+        // 0x80 = start of even field within the same frame.
+        m_asmPos = 0;
+        m_asmOdd = (p[0] & 0x40) != 0;
+        return;
+    }
+    // Continuation -- skip 4-byte header, interleave by field parity:
+    // odd field -> destination lines 0, 2, 4, ...; even -> 1, 3, 5, ...
+    int remain = len - 4;
+    const std::uint8_t* src = p + 4;
+    int linesdone = m_asmPos / kSrcBpl;
+    int lineoff = m_asmPos % kSrcBpl;
+    int dstLine = linesdone * 2 + (m_asmOdd ? 0 : 1);
+    int dstOff = dstLine * kSrcBpl + lineoff;
+    while (remain > 0) {
+        if (dstOff >= int(m_assembly.size())) return;
+        int lencopy = std::min(remain, kSrcBpl - lineoff);
+        if (dstOff + lencopy > int(m_assembly.size())) {
+            lencopy = int(m_assembly.size()) - dstOff;
+        }
+        if (lencopy <= 0) return;
+        std::memcpy(m_assembly.data() + dstOff, src, std::size_t(lencopy));
+        src += lencopy;
+        remain -= lencopy;
+        m_asmPos += lencopy;
+        lineoff = 0;
+        ++linesdone;
+        dstLine = linesdone * 2 + (m_asmOdd ? 0 : 1);
+        dstOff = dstLine * kSrcBpl;
+    }
+}
+
+void CMVisionGrabberFilter::deliver_frame() {
+    // We have an interleaved 720x480 UYVY frame in m_assembly. Scale 720->640
+    // horizontally (nearest-neighbor in UYVY pair units) to match SurfaceMount's
+    // requested format. Vertical is 480->480 (1:1).
+    auto* pin = m_pPin;
+    if (!pin) return;
+    IMemInputPin* in = pin->connected_input();
+    IMemAllocator* alloc = pin->connected_allocator();
+    if (!in || !alloc) return;
+    if (m_state == State_Stopped) return;
+
+    IMediaSample* sample = nullptr;
+    if (FAILED(alloc->GetBuffer(&sample, nullptr, nullptr, 0))) return;
+    BYTE* dst = nullptr;
+    if (FAILED(sample->GetPointer(&dst))) { sample->Release(); return; }
+    const LONG cap = sample->GetSize();
+    const int dstW = 640, dstH = 480, dstBpl = dstW * 2;
+    if (cap < dstBpl * dstH) { sample->Release(); return; }
+    for (int dy = 0; dy < dstH; ++dy) {
+        const std::uint8_t* sline = m_assembly.data() + dy * kSrcBpl;
+        std::uint8_t* dline = dst + dy * dstBpl;
+        for (int dx = 0; dx < dstW; dx += 2) {
+            int sx = (dx * kSrcW) / dstW;  // 0..718
+            sx &= ~1;                       // align to UYVY pair boundary
+            const std::uint8_t* sp = sline + sx * 2;
+            std::uint8_t* dp = dline + dx * 2;
+            dp[0] = sp[0]; dp[1] = sp[1]; dp[2] = sp[2]; dp[3] = sp[3];
+        }
+    }
+    sample->SetActualDataLength(dstBpl * dstH);
+    sample->SetSyncPoint(TRUE);
+    sample->SetDiscontinuity(FALSE);
+    REFERENCE_TIME tNow = 0;
+    if (m_pClock) m_pClock->GetTime(&tNow);
+    REFERENCE_TIME tStart = tNow - m_streamStart;
+    REFERENCE_TIME tStop = tStart + m_frameInterval;
+    sample->SetTime(&tStart, &tStop);
+    in->Receive(sample);
+    sample->Release();
+}
 
 HRESULT CreateInstance(IUnknown* /*pUnkOuter*/, REFIID riid, void** ppv) {
     auto* p = new CMVisionGrabberFilter();

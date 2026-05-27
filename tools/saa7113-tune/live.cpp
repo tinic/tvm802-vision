@@ -58,11 +58,13 @@ namespace saa {
 namespace {
 
 // ---- Capture geometry ---------------------------------------------------
-// NTSC 720x480 UYVY interlaced -- BUT the TVM802B's SAA7113 (or current
-// chip config) only delivers one field, so we capture and display 720x240
-// (the chip's odd-field-only output, stretched vertically to fill window).
+// NTSC 720x480 UYVY interlaced. The chip emits BOTH 0xc0 (odd field +
+// frame start) and 0x80 (even field) markers; we accumulate two field
+// halves into a 720x480 interleaved buffer. (An earlier build of this
+// tool didn't classify 0x80 correctly and we incorrectly concluded the
+// chip emitted only one field -- false alarm.)
 constexpr int kFrameW = 720;
-constexpr int kFrameH = 240;
+constexpr int kFrameH = 480;
 constexpr int kBytesPerLine = kFrameW * 2;
 constexpr int kFrameBytes = kBytesPerLine * kFrameH;
 
@@ -189,13 +191,12 @@ void process_packet(State& s, const std::uint8_t* p, int len) {
     int remain = len - hdr;
     const std::uint8_t* src = p + hdr;
 
-    // The TVM802B's SAA7113 (or its config) only emits the odd field --
-    // never the 0x80 even-field marker -- so we have ONE field per frame
-    // marker (= 240 lines for NTSC). Pack them consecutively into the top
-    // half of the buffer; render scales 720x240 up to window size.
+    // Interleaved storage: odd-field lines at indices 0, 2, 4... and
+    // even-field lines at 1, 3, 5... per Linux stk1160-video.c.
     int linesdone = s.back.pos / kBytesPerLine;
     int lineoff = s.back.pos % kBytesPerLine;
-    int dstOff = linesdone * kBytesPerLine + lineoff;
+    int dstLine = linesdone * 2 + (s.back.odd ? 0 : 1);
+    int dstOff = dstLine * kBytesPerLine + lineoff;
 
     while (remain > 0) {
         if (dstOff >= kFrameBytes) return;
@@ -210,7 +211,8 @@ void process_packet(State& s, const std::uint8_t* p, int len) {
         s.back.bytesused += lencopy;
         lineoff = 0;
         ++linesdone;
-        dstOff = linesdone * kBytesPerLine;
+        dstLine = linesdone * 2 + (s.back.odd ? 0 : 1);
+        dstOff = dstLine * kBytesPerLine;
     }
 }
 
@@ -341,8 +343,8 @@ HWND create_window(State& s) {
     wc.lpszClassName = "Saa7113Preview";
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     RegisterClassA(&wc);
-    // Window opens at 720x480 (display aspect for single-field 720x240).
-    RECT rc{0, 0, kFrameW, kFrameH * 2};
+    // Window at native 720x480.
+    RECT rc{0, 0, kFrameW, kFrameH};
     AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
     HWND h = CreateWindowA("Saa7113Preview", "saa7113-tune live preview",
                            WS_OVERLAPPEDWINDOW | WS_VISIBLE,
