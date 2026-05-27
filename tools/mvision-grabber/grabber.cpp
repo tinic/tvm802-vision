@@ -302,6 +302,21 @@ class CClassFactory final : public IClassFactory {
 // and be a connectable capture pin. Streaming Receive() flow is TODO.
 // =========================================================================
 
+// SEH-safe COM Release. SurfaceMount + DirectShowLib-2005 sometimes release
+// downstream filters before our dtor runs (against the documented
+// "both pins hold refs" contract). Releasing a dangling COM pointer faults
+// the whole process on form-close. This helper catches the AV so we can
+// no-op when downstream is dead and release cleanly when it isn't.
+// Must live in a function with no C++ object unwinding (no destructors)
+// hence the standalone helper.
+static void safe_release(IUnknown* p) {
+    if (!p) return;
+    __try { p->Release(); }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        OutputDebugStringA("[mvision_grabber] safe_release: Release faulted; ignored\n");
+    }
+}
+
 // Free a media type's allocated pointers in place (does NOT free the struct).
 inline void free_media_type(AM_MEDIA_TYPE* mt) {
     if (mt->pbFormat) { CoTaskMemFree(mt->pbFormat); mt->pbFormat = nullptr; }
@@ -314,7 +329,14 @@ class CCaptureOutputPin final : public IPin,
                                 public IKsPropertySet,
                                 public IQualityControl {
     std::atomic<LONG> m_ref{1};
+    std::atomic<bool> m_cleanedUp{false};
     IBaseFilter* m_pFilter = nullptr;          // owner; weak ref
+    // The three "connection" pointers below are read by the worker thread
+    // (deliver_frame) and reset by Disconnect / ~CCaptureOutputPin on the
+    // main thread. Without a lock, the worker can dereference a pointer
+    // that's about to be released -> crash on graph teardown. The mutex
+    // is mutable so const accessors (used by snapshot helpers) can lock.
+    mutable std::mutex m_connMu;
     IPin* m_pConnected = nullptr;              // downstream; strong ref
     IMemInputPin* m_pInput = nullptr;          // downstream's IMemInputPin
     IMemAllocator* m_pAllocator = nullptr;     // negotiated allocator
@@ -325,15 +347,40 @@ class CCaptureOutputPin final : public IPin,
     explicit CCaptureOutputPin(IBaseFilter* pFilter) : m_pFilter(pFilter) {
         make_default_media_type(&m_mtCurrent);
     }
+    // Dtor never runs in practice -- see Release(). Keep it correct for
+    // any explicit `delete` path (we don't take one).
     ~CCaptureOutputPin() {
-        if (m_pAllocator) m_pAllocator->Release();
-        if (m_pInput) m_pInput->Release();
-        if (m_pConnected) m_pConnected->Release();
+        if (!m_cleanedUp.exchange(true)) pin_cleanup();
         free_media_type(&m_mtCurrent);
     }
 
-    IMemInputPin* connected_input() const { return m_pInput; }
-    IMemAllocator* connected_allocator() const { return m_pAllocator; }
+    void pin_cleanup() {
+        OutputDebugStringA("[mvision_grabber] Pin cleanup\n");
+        IMemAllocator* a = nullptr;
+        IMemInputPin*  i = nullptr;
+        IPin*          c = nullptr;
+        {
+            std::lock_guard lk(m_connMu);
+            a = m_pAllocator; m_pAllocator = nullptr;
+            i = m_pInput;     m_pInput = nullptr;
+            c = m_pConnected; m_pConnected = nullptr;
+        }
+        // See safe_release() comment: SurfaceMount/DSLib teardown order
+        // can dangle downstream by this point.
+        safe_release(a);
+        safe_release(i);
+        safe_release(c);
+    }
+
+    // Atomically snapshot+AddRef the two pointers the worker needs.
+    // Returns false if the pin is currently disconnected. Caller releases.
+    bool snapshot_input_alloc(IMemInputPin** ppIn, IMemAllocator** ppAlloc) {
+        std::lock_guard lk(m_connMu);
+        if (!m_pInput || !m_pAllocator) return false;
+        *ppIn = m_pInput;     (*ppIn)->AddRef();
+        *ppAlloc = m_pAllocator; (*ppAlloc)->AddRef();
+        return true;
+    }
     const AM_MEDIA_TYPE& current_format() const { return m_mtCurrent; }
 
     // IUnknown ------------------------------------------------------------
@@ -356,9 +403,14 @@ class CCaptureOutputPin final : public IPin,
     }
     STDMETHODIMP_(ULONG) AddRef() override { return ULONG(++m_ref); }
     STDMETHODIMP_(ULONG) Release() override {
+        // LEAK ON RELEASE -- see the long comment on the filter's Release.
+        // Run cleanup once when refcount first hits 0, but never `delete
+        // this`, so a subsequent over-Release just decrements a still-valid
+        // atomic instead of touching freed memory.
         LONG r = --m_ref;
-        if (r == 0) delete this;
-        return ULONG(r);
+        if (r == 0 && !m_cleanedUp.exchange(true)) pin_cleanup();
+        if (r < 0) m_ref = 0;
+        return r > 0 ? ULONG(r) : 0;
     }
     // IPin ----------------------------------------------------------------
     STDMETHODIMP Connect(IPin* pReceivePin, const AM_MEDIA_TYPE* pmt) override {
@@ -405,23 +457,34 @@ class CCaptureOutputPin final : public IPin,
             return hr;
         }
 
-        m_pConnected = pReceivePin;
-        m_pConnected->AddRef();
-        m_pInput = pIn;            // ownership transferred
-        m_pAllocator = pAlloc;     // ownership transferred
+        {
+            std::lock_guard lk(m_connMu);
+            m_pConnected = pReceivePin;
+            m_pConnected->AddRef();
+            m_pInput = pIn;            // ownership transferred
+            m_pAllocator = pAlloc;     // ownership transferred
+        }
         return S_OK;
     }
     STDMETHODIMP ReceiveConnection(IPin*, const AM_MEDIA_TYPE*) override {
         return E_UNEXPECTED;  // we're an output pin
     }
     STDMETHODIMP Disconnect() override {
-        if (m_pAllocator) {
-            m_pAllocator->Decommit();
-            m_pAllocator->Release();
-            m_pAllocator = nullptr;
+        // Locally extract then null out under the lock; do the releases
+        // after the lock to avoid holding it across Decommit (which can
+        // synchronize with the downstream allocator).
+        IMemAllocator* a = nullptr;
+        IMemInputPin* i = nullptr;
+        IPin* c = nullptr;
+        {
+            std::lock_guard lk(m_connMu);
+            a = m_pAllocator; m_pAllocator = nullptr;
+            i = m_pInput;     m_pInput = nullptr;
+            c = m_pConnected; m_pConnected = nullptr;
         }
-        if (m_pInput) { m_pInput->Release(); m_pInput = nullptr; }
-        if (m_pConnected) { m_pConnected->Release(); m_pConnected = nullptr; }
+        if (a) { a->Decommit(); a->Release(); }
+        if (i) i->Release();
+        if (c) c->Release();
         return S_OK;
     }
     STDMETHODIMP ConnectedTo(IPin** ppPin) override {
@@ -566,6 +629,7 @@ class CCaptureOutputPin final : public IPin,
 
 class CMVisionGrabberFilter final : public IBaseFilter, public IAMVideoProcAmp {
     std::atomic<LONG> m_ref{1};
+    std::atomic<bool> m_cleanedUp{false};
     CCaptureOutputPin* m_pPin = nullptr;
     IFilterGraph* m_pGraph = nullptr;          // weak ref per DirectShow rules
     IReferenceClock* m_pClock = nullptr;
@@ -605,10 +669,32 @@ class CMVisionGrabberFilter final : public IBaseFilter, public IAMVideoProcAmp {
         m_pPin = new CCaptureOutputPin(this);
         m_assembly.assign(std::size_t(kSrcBpl * kSrcH), 0);
     }
+    // Dtor never runs in practice -- see Release(). Keep it correct for
+    // any explicit `delete` path (we don't take one).
     ~CMVisionGrabberFilter() {
+        if (!m_cleanedUp.exchange(true)) filter_cleanup();
+    }
+
+    void filter_cleanup() {
+        OutputDebugStringA("[mvision_grabber] Filter cleanup: stop_worker\n");
         stop_worker();
-        if (m_pPin) m_pPin->Release();
-        if (m_pClock) m_pClock->Release();
+        OutputDebugStringA("[mvision_grabber] Filter cleanup: pin release\n");
+        if (m_pPin) { m_pPin->Release(); m_pPin = nullptr; }
+        OutputDebugStringA("[mvision_grabber] Filter cleanup: clock release\n");
+        safe_release(m_pClock);
+        m_pClock = nullptr;
+        // m_usb closes when filter_cleanup ends only if we'd actually destroy
+        // the object -- since we leak, we close USB explicitly here.
+        if (m_usbOpen) {
+            libusb_release_interface(m_usb.h, 0);
+            // m_usb's UsbCtx dtor handles libusb_close + libusb_exit when
+            // the object actually gets freed. Since we leak the filter,
+            // we'd never close USB; do it now manually.
+            if (m_usb.h) { libusb_close(m_usb.h); m_usb.h = nullptr; }
+            if (m_usb.inited) { libusb_exit(nullptr); m_usb.inited = false; }
+            m_usbOpen = false;
+        }
+        OutputDebugStringA("[mvision_grabber] Filter cleanup: done\n");
     }
 
     // IUnknown ------------------------------------------------------------
@@ -628,9 +714,20 @@ class CMVisionGrabberFilter final : public IBaseFilter, public IAMVideoProcAmp {
     }
     STDMETHODIMP_(ULONG) AddRef() override { return ULONG(++m_ref); }
     STDMETHODIMP_(ULONG) Release() override {
+        // LEAK ON RELEASE. Long story: DirectShowLib-2005 + SurfaceMount's
+        // form-close path Releases this filter one too many times -- some
+        // .NET wrapper held a native pointer past its true lifetime. With
+        // the textbook `if (r == 0) delete this`, the over-release crashed
+        // at `--m_ref` on freed memory. We can't fix DSLib, so instead we
+        // never free the object. On the FIRST hit to zero we run cleanup
+        // (stop worker, close USB, release downstream refs); subsequent
+        // Release calls just decrement a still-valid std::atomic and
+        // return 0. The leak is one filter object per SurfaceMount session
+        // (a few hundred bytes plus a closed UsbCtx), which is negligible.
         LONG r = --m_ref;
-        if (r == 0) delete this;
-        return ULONG(r);
+        if (r == 0 && !m_cleanedUp.exchange(true)) filter_cleanup();
+        if (r < 0) m_ref = 0;
+        return r > 0 ? ULONG(r) : 0;
     }
     // IPersist ------------------------------------------------------------
     STDMETHODIMP GetClassID(CLSID* pClsID) override {
@@ -640,8 +737,13 @@ class CMVisionGrabberFilter final : public IBaseFilter, public IAMVideoProcAmp {
     }
     // IMediaFilter --------------------------------------------------------
     STDMETHODIMP Stop() override {
-        stop_worker();
+        // CRITICAL ORDER: flip state to Stopped BEFORE joining the worker.
+        // deliver_frame() checks m_state and early-returns if Stopped, so
+        // setting it first guarantees no further Receive() calls after
+        // this point (which could otherwise deadlock against the graph
+        // mutex while we wait on join).
         m_state = State_Stopped;
+        stop_worker();
         return S_OK;
     }
     STDMETHODIMP Pause() override {
@@ -965,33 +1067,40 @@ void CMVisionGrabberFilter::process_packet(const std::uint8_t* p, int len) {
 }
 
 void CMVisionGrabberFilter::deliver_frame() {
-    // We have an interleaved 720x480 UYVY frame in m_assembly. Scale 720->640
-    // horizontally (nearest-neighbor in UYVY pair units) to match SurfaceMount's
-    // requested format. Vertical is 480->480 (1:1).
+    if (m_state == State_Stopped) return;
     auto* pin = m_pPin;
     if (!pin) return;
-    IMemInputPin* in = pin->connected_input();
-    IMemAllocator* alloc = pin->connected_allocator();
-    if (!in || !alloc) return;
-    if (m_state == State_Stopped) return;
+
+    // Atomically AddRef the pin's connection state -- otherwise Disconnect
+    // on the main thread can Release them while we're using them. Cleared
+    // up before this function returns.
+    IMemInputPin* in = nullptr;
+    IMemAllocator* alloc = nullptr;
+    if (!pin->snapshot_input_alloc(&in, &alloc)) return;
 
     IMediaSample* sample = nullptr;
-    if (FAILED(alloc->GetBuffer(&sample, nullptr, nullptr, 0))) return;
+    if (FAILED(alloc->GetBuffer(&sample, nullptr, nullptr, 0))) {
+        in->Release(); alloc->Release(); return;
+    }
     BYTE* dst = nullptr;
-    if (FAILED(sample->GetPointer(&dst))) { sample->Release(); return; }
+    if (FAILED(sample->GetPointer(&dst))) {
+        sample->Release(); in->Release(); alloc->Release(); return;
+    }
     const LONG cap = sample->GetSize();
     const int dstW = 640, dstH = 480, dstBpl = dstW * 2;
-    if (cap < dstBpl * dstH) { sample->Release(); return; }
+    if (cap < dstBpl * dstH) {
+        sample->Release(); in->Release(); alloc->Release(); return;
+    }
+
+    // 720 source -> 640 destination by center-CROP, not squeeze: drop 40
+    // pixels (= 80 bytes UYVY) from each side. The dropped pixels are
+    // ITU-656 active-blank margins, not real image, so cropping preserves
+    // the 4:3 aspect SurfaceMount expects. Vertical is 1:1.
+    constexpr int kXOffset = ((kSrcW - 640) / 2) * 2;  // 80 bytes
     for (int dy = 0; dy < dstH; ++dy) {
-        const std::uint8_t* sline = m_assembly.data() + dy * kSrcBpl;
+        const std::uint8_t* sline = m_assembly.data() + dy * kSrcBpl + kXOffset;
         std::uint8_t* dline = dst + dy * dstBpl;
-        for (int dx = 0; dx < dstW; dx += 2) {
-            int sx = (dx * kSrcW) / dstW;  // 0..718
-            sx &= ~1;                       // align to UYVY pair boundary
-            const std::uint8_t* sp = sline + sx * 2;
-            std::uint8_t* dp = dline + dx * 2;
-            dp[0] = sp[0]; dp[1] = sp[1]; dp[2] = sp[2]; dp[3] = sp[3];
-        }
+        std::memcpy(dline, sline, std::size_t(dstBpl));
     }
     sample->SetActualDataLength(dstBpl * dstH);
     sample->SetSyncPoint(TRUE);
@@ -1002,7 +1111,10 @@ void CMVisionGrabberFilter::deliver_frame() {
     REFERENCE_TIME tStop = tStart + m_frameInterval;
     sample->SetTime(&tStart, &tStop);
     in->Receive(sample);
+
     sample->Release();
+    in->Release();
+    alloc->Release();
 }
 
 HRESULT CreateInstance(IUnknown* /*pUnkOuter*/, REFIID riid, void** ppv) {
@@ -1126,7 +1238,17 @@ STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, LPVOID* ppv) {
 }
 
 STDAPI DllCanUnloadNow() {
-    return g_serverLockCount == 0 ? S_OK : S_FALSE;
+    // NEVER allow unload while the process is alive. Standard DllCanUnloadNow
+    // returns S_OK when serverLock + alive-object counts are zero, expecting
+    // COM clients to LockServer or AddRef properly to keep the DLL pinned.
+    // SurfaceMount + DirectShowLib-2005 don't: they call CoFreeUnusedLibraries
+    // implicitly via Marshal.CleanupUnusedObjectsInCurrentContext after form
+    // teardown, our DLL gets unmapped, and any leftover .NET RCW that still
+    // holds a pointer to our (leaked) COM object then dereferences a vtable
+    // that's no longer mapped -> AccessViolationException on Release().
+    // Refusing to unload makes the leaked objects' vtables stay valid for
+    // the rest of the process lifetime, which is what we need.
+    return S_FALSE;
 }
 
 STDAPI DllRegisterServer() {
