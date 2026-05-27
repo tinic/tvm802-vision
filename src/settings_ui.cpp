@@ -35,6 +35,7 @@
 #endif
 #include <windows.h>
 #include <commctrl.h>
+#include <uxtheme.h>  // SetWindowTheme -- disable themeing on detector strip buttons
 
 #include <algorithm>
 #include <array>
@@ -152,6 +153,10 @@ std::array<HWND, S_COUNT> g_lblVal{};
 HWND g_chkMedian = nullptr;
 std::array<HWND, METHOD_COUNT> g_chkMethod{};  // Detector on/off boxes, METHOD_* order
 HBRUSH g_brGreen = nullptr, g_brRed = nullptr;
+HBRUSH g_brPanel = nullptr;  // explicit medium-light grey for the dialog surface --
+                             // COLOR_BTNFACE (#F0F0F0 on Win10 themed) is too close to
+                             // pure white to read as "grey" against the tab interior
+                             // and the screenshots all look uniformly white.
 bool g_lastFound = false;
 HWND g_cboMode = nullptr;                // "Edit:" detector dropdown (Round/Circular/Template/Component)
 int g_curMode = MODE_ROUND;              // which mode's settings the sliders currently edit
@@ -264,7 +269,9 @@ HBRUSH brush_for_control(HWND ctl) {
     if (ctl != nullptr && inside_tab(ctl)) {
         return static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH));
     }
-    return reinterpret_cast<HBRUSH>(static_cast<INT_PTR>(COLOR_BTNFACE + 1));
+    return g_brPanel != nullptr
+               ? g_brPanel
+               : reinterpret_cast<HBRUSH>(static_cast<INT_PTR>(COLOR_BTNFACE + 1));
 }
 
 // Show the per-tab control set; hide everything else. Cheap (just SW_HIDE /
@@ -655,6 +662,14 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         reinterpret_cast<HMENU>(static_cast<INT_PTR>(chk[i].id)), g_inst, nullptr);
                     SendMessageA(g_chkMethod[i], BM_SETCHECK,
                                  method_enabled(chk[i].method) ? BST_CHECKED : BST_UNCHECKED, 0);
+                    // Disable visual styles theming for the detector strip
+                    // checkboxes so they actually honour the brush returned
+                    // from WM_CTLCOLORBTN (themed BS_AUTOCHECKBOX otherwise
+                    // hardcodes the system-window-white bg regardless of our
+                    // brush). Empty pszSubAppName + pszSubIdList = "no theme".
+                    // Median (inside tab, white bg) keeps theming; only the
+                    // detector strip needs the override.
+                    SetWindowTheme(g_chkMethod[i], L"", L"");
                     chkX += chk[i].w + kChkGap;
                 }
 
@@ -804,20 +819,21 @@ void ui_thread() {
     g_inst = GetModuleHandleA(nullptr);
     g_brGreen = CreateSolidBrush(RGB(40, 150, 60));
     g_brRed = CreateSolidBrush(RGB(170, 50, 50));
-    g_actctx = make_v6_context();  // themed controls
-    g_font = create_ui_font();     // host-matching font
+    g_brPanel = CreateSolidBrush(RGB(225, 225, 225));  // medium-light panel grey
+    g_actctx = make_v6_context();                      // themed controls
+    g_font = create_ui_font();                         // host-matching font
 
     WNDCLASSEXA wc{};
     wc.cbSize = sizeof wc;
     wc.lpfnWndProc = wnd_proc;
     wc.hInstance = g_inst;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    // Standard themed dialog background (COLOR_BTNFACE = host's panel grey).
-    // The tab control's content area paints its own bg; the static labels and
-    // checkboxes are made transparent in WM_CTLCOLORSTATIC / WM_CTLCOLORBTN so
-    // they pick up whichever bg is behind them (panel grey OR tab interior),
-    // instead of each control adding its own opaque rectangle.
-    wc.hbrBackground = reinterpret_cast<HBRUSH>(static_cast<INT_PTR>(COLOR_BTNFACE + 1));
+    // Explicit medium-light grey for the panel (g_brPanel = RGB(225, 225, 225))
+    // -- the system COLOR_BTNFACE on Win10/11 themed default (#F0F0F0) is too
+    // close to pure white to read as "grey" against the tab interior's actual
+    // white, so we pick something visibly distinct. The static labels +
+    // checkboxes return this same brush from WM_CTLCOLOR* so they match.
+    wc.hbrBackground = g_brPanel;
     wc.lpszClassName = kClassName;
     RegisterClassExA(&wc);
 
