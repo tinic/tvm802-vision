@@ -83,16 +83,11 @@ regsvr32 mvision_grabber.ax
 
 (Once we have the INF, distribution is single-step via `pnputil`.)
 
-## Status — see commit/tag for the live state
+## Status
 
-- [ ] COM skeleton compiles + `regsvr32` succeeds
-- [ ] Filter shows up in GraphEdt under "Video Capture Sources"
-- [ ] `IAMStreamConfig::GetFormat` returns UYVY 640×480
-- [ ] Pin connects to SampleGrabber
-- [ ] Frames flow (UYVY samples downstream, ~25–30 fps)
-- [ ] `IAMVideoProcAmp` Brightness writes SAA7113 reg 0x0A — verified visible
-- [ ] Vendor `IKsPropertySet` for input select / AGC / hist
-- [ ] Custom INF (replaces Syntek binding cleanly)
-- [ ] Signed binary
-
-Tracked in repo task list (#59).
+Shipping since v1.11.0 — full DirectShow pipeline (enum / connect /
+allocator / `IAMVideoProcAmp` real-hardware / streaming) validated
+end-to-end against SurfaceMount. The remaining items would just polish
+distribution (custom INF that binds WinUSB at first plug = no Zadig
+dance, signed binary = no SmartScreen warning); both are optional and
+the project owner is comfortable shipping with the one-time Zadig step.
