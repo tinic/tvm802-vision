@@ -1,17 +1,22 @@
 // settings_ui.cpp -- the classic Win32 settings dialog (the second part of the
 // module that touches the Windows API, alongside preview.cpp). A DLL-owned thread
-// registers a global hotkey (Ctrl+Alt+M) and serves a modeless tabbed dialog:
-//   Detection -- per-mode detection knobs (diameter / sensitivity / exposure /
-//                median-ring; Component-only help line about CompThre routing)
-//   Image     -- pre-detection adjustments (gamma / brightness / contrast /
-//                black-point / white-point / sharpen / blur)
-//   Profiles  -- read-only listing of the 10 CompThre profile slots so the
-//                operator can see what CompThre = N picks today
-//   Detectors -- master on/off switches per detector (fall back to stock vision)
-// A status banner above the tabs (LOCKED / NO-LOCK, score, radius, offset)
-// stays visible regardless of which tab is active. Footer holds Save / Reset
-// / Close. The dialog writes vis::Settings (which the detectors read) and
-// persists to MVision.ini in the host working directory.
+// registers a global hotkey (Ctrl+Alt+M) and serves a modeless dialog:
+//
+//   Header     : active-mode label + "Edit:" dropdown to pick which mode the
+//                Detection tab targets (Round / Circular / Template / Component).
+//   Status     : LOCKED / NO-LOCK banner with score / radius / offset, pinned
+//                at the top so it stays visible regardless of tab.
+//   Tabs       : Detection -- per-mode knobs (diameter / sensitivity / exposure
+//                             / median-ring; Component-only CompThre help line)
+//                Image     -- pre-detection adjustments (gamma / brightness /
+//                             contrast / black-point / white-point / sharpen / blur)
+//   Detectors  : persistent strip BELOW the tab control with the 4 master
+//                on/off switches (uncheck = fall back to stock vision for that
+//                mode). Global setting; not tab-specific.
+//   Footer     : Save / Reset / Close.
+//
+// The dialog writes vis::Settings (which the detectors read) and persists to
+// MVision.ini in the host working directory.
 //
 // Tab implementation: all controls remain children of the main dialog; on
 // TCN_SELCHANGE we ShowWindow each to match the active tab (no reparenting).
@@ -23,14 +28,13 @@
 #include "capture.h"
 #include "controller.h"
 #include "settings.h"
-#include "vision.h"  // comp_profile_name / comp_profile_count for the Profiles tab
+#include "vision.h"  // METHOD_* + comp_profile_name/comp_profile_count (latter held for future Profiles tab)
 
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #include <windows.h>
 #include <commctrl.h>
-#include <uxtheme.h>  // EnableThemeDialogTexture -- makes the tab content bg match the dialog
 
 #include <algorithm>
 #include <array>
@@ -76,10 +80,16 @@ enum : int { ID_TIMER = 1,
 // label) is assigned a Tab via kSliderTab[] / kHeaderTab below. On
 // TCN_SELCHANGE we ShowWindow each control to match the active tab -- no
 // reparenting, controls stay children of the main dialog.
+//
+// Only two tabs are shown today: per-mode Detection knobs, and the universal
+// pre-detection Image adjustments. The global detector master-switches (Round /
+// Circular / Template / Component) sit in a persistent strip below the tab
+// control -- they're global, not mode-specific, so a tab page for them was
+// awkward. The Profiles slot listing (CompThre 0-9 reservation) is hidden until
+// any of the 1-9 slots actually carry a profile; today they're all empty so the
+// page has no signal value.
 enum Tab : int { TAB_DETECTION,
                  TAB_IMAGE,
-                 TAB_PROFILES,
-                 TAB_DETECTORS,
                  TAB_COUNT };
 
 // One slider per tunable. `kind` drives both the value-label format and the
@@ -153,10 +163,7 @@ HANDLE g_actctx = INVALID_HANDLE_VALUE;  // comctl32 v6 activation context -> th
 // it belongs to and is shown/hidden on TCN_SELCHANGE; no reparenting.
 HWND g_tabs = nullptr;
 int g_curTab = TAB_DETECTION;
-HWND g_lblHelpDetectors = nullptr;    // "Uncheck = use stock" header on Detectors tab
-HWND g_lblHelpComp = nullptr;         // "CompThre 0-9 = profile..." help on Detection tab when Component
-HWND g_lblProfileHelp = nullptr;      // top-of-tab help on Profiles tab
-std::array<HWND, 10> g_lblProfile{};  // 10 slot-row labels on Profiles tab
+HWND g_lblHelpComp = nullptr;  // "CompThre = ..." help on Detection tab when Component is selected
 
 // The system dialog font -- what native dialogs and the (themed) host use, so our
 // controls match instead of the legacy bitmap "System" font.
@@ -230,18 +237,10 @@ void show_tab(int tab) {
         ShowWindow(g_lblHelpComp,
                    (tab == TAB_DETECTION && g_curMode == MODE_COMP) ? SW_SHOWNA : SW_HIDE);
     }
-    for (auto& h : g_chkMethod) {
-        ShowWindow(h, (tab == TAB_DETECTORS) ? SW_SHOWNA : SW_HIDE);
-    }
-    if (g_lblHelpDetectors != nullptr) {
-        ShowWindow(g_lblHelpDetectors, (tab == TAB_DETECTORS) ? SW_SHOWNA : SW_HIDE);
-    }
-    if (g_lblProfileHelp != nullptr) {
-        ShowWindow(g_lblProfileHelp, (tab == TAB_PROFILES) ? SW_SHOWNA : SW_HIDE);
-    }
-    for (auto& h : g_lblProfile) {
-        ShowWindow(h, (tab == TAB_PROFILES) ? SW_SHOWNA : SW_HIDE);
-    }
+    // The 4 detector master switches + their header are persistent (global
+    // settings strip below the tab control), shown regardless of tab. The
+    // Profiles labels are not created today (slot registry is empty until a
+    // profile is authored); the hide loops are gone with them.
 }
 
 HWND make_button(HWND parent, int id, const char* text, int x, int y, int w, int h) {
@@ -507,15 +506,6 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 icc.dwICC = ICC_BAR_CLASSES | ICC_TAB_CLASSES;
                 InitCommonControlsEx(&icc);
 
-                // Make the tab control's content area use the themed tab-body
-                // background instead of stark white. Without this, the tab pages
-                // render with a hard-coded white fill that mismatches the rest
-                // of the dialog (COLOR_BTNFACE gray) -- visible as a bright
-                // white band around the per-tab controls. ETDT_ENABLETAB =
-                // ETDT_ENABLE | ETDT_USETABTEXTURE; the dialog draws its own
-                // background as the themed tab body when this is set.
-                EnableThemeDialogTexture(hwnd, ETDT_ENABLETAB);
-
                 // ---- Header: active-mode label + "Edit:" dropdown -------------
                 g_lblMode = make_static(hwnd, "Active mode:  (none yet)", 12, 8, 206, 18);
                 make_static(hwnd, "Edit:", 224, 9, 30, 16);
@@ -532,9 +522,14 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 g_lblStatus = make_static(hwnd, " NO LOCK", 12, 34, 396, 42);
 
                 // ---- Tab control covering the middle band ---------------------
+                // Two tabs only: per-mode Detection knobs + universal Image
+                // adjustments. Detector master-switches sit in their own strip
+                // below the tab control (global, not mode-specific); the
+                // Profiles slot listing is omitted today (all CompThre 0-9
+                // slots are empty -- nothing to show).
                 g_tabs = CreateWindowExA(0, WC_TABCONTROLA, "",
                                          WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
-                                         8, 84, 404, 320, hwnd,
+                                         8, 84, 404, 240, hwnd,
                                          reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TAB)),
                                          g_inst, nullptr);
                 {
@@ -542,7 +537,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     // char arrays instead of a string-literal table + const_cast.
                     std::array<std::array<char, 16>, TAB_COUNT> tabLabels{};
                     static constexpr std::array<const char*, TAB_COUNT> kTabLabels = {
-                        "Detection", "Image", "Profiles", "Detectors"};
+                        "Detection", "Image"};
                     for (int i = 0; i < TAB_COUNT; ++i) {
                         std::strncpy(tabLabels[i].data(), kTabLabels[i], tabLabels[i].size() - 1);
                         TCITEMA ti{};
@@ -572,44 +567,36 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                               24, 250, 340, 20, hwnd,
                                               reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_CHK_MEDIAN)),
                                               g_inst, nullptr);
-                g_lblHelpComp = make_static(hwnd,
-                                            "CompThre in host ParamEdit: 0-9 = profile slot (see Profiles tab),\n"
-                                            "10-100 = manual % of ROI max brightness.",
-                                            24, 278, 360, 38);
+                g_lblHelpComp =
+                    make_static(hwnd,
+                                "CompThre in host ParamEdit: 10-100 = manual % of ROI max brightness.\n"
+                                "(0-9 reserved for per-board profile slots; none authored yet.)",
+                                24, 278, 360, 38);
 
-                // ---- Profiles tab: slot listing + help ------------------------
-                g_lblProfileHelp = make_static(hwnd,
-                                               "Set CompThre in host ParamEdit per feeder slot. Save the placement CSV\n"
-                                               "after editing -- it carries the per-slot values.",
-                                               24, 110, 360, 32);
-                for (int slot = 0; slot < static_cast<int>(g_lblProfile.size()); ++slot) {
-                    const char* nm = comp_profile_name(slot);
-                    const std::string row = std::format(
-                        "{:>2}    {}", slot,
-                        nm != nullptr ? nm : "(reserved -- falls through to AUTO)");
-                    g_lblProfile[static_cast<std::size_t>(slot)] =
-                        make_static(hwnd, row.c_str(), 36, 150 + slot * 18, 360, 18);
-                }
-
-                // ---- Detectors tab: master switches ---------------------------
-                g_lblHelpDetectors = make_static(hwnd,
-                                                 "Uncheck a detector to fall back to the stock vision for that mode.",
-                                                 24, 110, 360, 18);
+                // ---- Detector master switches: persistent strip below the tabs.
+                // Global setting (uncheck = fall back to stock vision for that
+                // mode); shown regardless of which tab is selected.
+                make_static(hwnd, "Detectors  (uncheck = use stock vision):",
+                            12, 332, 300, 16);
                 struct ChkDef {
                     int id;
                     int method;
                     const char* label;
                 };
                 const std::array<ChkDef, METHOD_COUNT> chk = {{
-                    {.id = ID_CHK_ROUND, .method = METHOD_ROUND, .label = "Round  (CheckMark)"},
-                    {.id = ID_CHK_CIRCULAR, .method = METHOD_CIRCULAR, .label = "Circular  (CheckMark2)"},
-                    {.id = ID_CHK_TEMPLATE, .method = METHOD_TEMPLATE, .label = "ImageTemplate  (CheckTemplate)"},
-                    {.id = ID_CHK_COMP, .method = METHOD_COMP, .label = "Component up-vision  (CheckComp)"},
+                    {.id = ID_CHK_ROUND, .method = METHOD_ROUND, .label = "Round"},
+                    {.id = ID_CHK_CIRCULAR, .method = METHOD_CIRCULAR, .label = "Circular"},
+                    {.id = ID_CHK_TEMPLATE, .method = METHOD_TEMPLATE, .label = "Template"},
+                    {.id = ID_CHK_COMP, .method = METHOD_COMP, .label = "Component"},
                 }};
+                constexpr int kChkY = 352;
+                constexpr int kChkW = 90;
+                constexpr int kChkH = 20;
                 for (std::size_t i = 0; i < chk.size(); ++i) {
+                    const int x = 12 + static_cast<int>(i) * (kChkW + 8);
                     g_chkMethod[i] = CreateWindowExA(
-                        0, "BUTTON", chk[i].label, WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 24,
-                        140 + static_cast<int>(i) * 24, 360, 20, hwnd,
+                        0, "BUTTON", chk[i].label, WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, x,
+                        kChkY, kChkW, kChkH, hwnd,
                         reinterpret_cast<HMENU>(static_cast<INT_PTR>(chk[i].id)), g_inst, nullptr);
                     SendMessageA(g_chkMethod[i], BM_SETCHECK,
                                  method_enabled(chk[i].method) ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -619,7 +606,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 constexpr int kBtnW = 80;
                 constexpr int kBtnH = 26;
                 constexpr int kBtnGap = 10;
-                constexpr int kBtnY = 420;
+                constexpr int kBtnY = 388;
                 constexpr int kNBtn = 3;
                 RECT cr{};
                 GetClientRect(hwnd, &cr);
@@ -715,7 +702,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 void create_window() {
     const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
     const DWORD ex = WS_EX_TOPMOST | WS_EX_TOOLWINDOW;
-    RECT wr{0, 0, 420, 470};
+    RECT wr{0, 0, 420, 430};
     AdjustWindowRectEx(&wr, style, FALSE, ex);
     // Activate the v6 context around creation so this window AND the child controls
     // it makes in WM_CREATE render themed.
@@ -758,7 +745,11 @@ void ui_thread() {
     wc.lpfnWndProc = wnd_proc;
     wc.hInstance = g_inst;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.hbrBackground = reinterpret_cast<HBRUSH>(static_cast<INT_PTR>(COLOR_BTNFACE + 1));
+    // White window background -- modern flat look (vs Win2K's COLOR_BTNFACE gray).
+    // The tab control's content area is already white by default, so this also
+    // collapses the previous tab-vs-dialog colour split that needed
+    // EnableThemeDialogTexture to paper over.
+    wc.hbrBackground = reinterpret_cast<HBRUSH>(static_cast<INT_PTR>(COLOR_WINDOW + 1));
     wc.lpszClassName = kClassName;
     RegisterClassExA(&wc);
 
