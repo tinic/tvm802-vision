@@ -626,28 +626,36 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 // mode); shown regardless of which tab is selected.
                 make_static(hwnd, "Detectors  (uncheck = use stock vision):",
                             12, 360, 320, 18);
+                // Per-label widths: the themed BS_AUTOCHECKBOX paints its entire
+                // HWND rect with the system window colour (white) regardless of
+                // what brush we return from WM_CTLCOLORBTN. Sizing each control
+                // to JUST its visible content (~17 px for the box + glyph gap
+                // plus the text width at 10pt Segoe UI) leaves no excess area
+                // for the theme to fill -- no white band trailing the label.
                 struct ChkDef {
                     int id;
                     int method;
                     const char* label;
+                    int w;  // tight width: 17 (box) + text + 4 (padding)
                 };
                 const std::array<ChkDef, METHOD_COUNT> chk = {{
-                    {.id = ID_CHK_ROUND, .method = METHOD_ROUND, .label = "Round"},
-                    {.id = ID_CHK_CIRCULAR, .method = METHOD_CIRCULAR, .label = "Circular"},
-                    {.id = ID_CHK_TEMPLATE, .method = METHOD_TEMPLATE, .label = "Template"},
-                    {.id = ID_CHK_COMP, .method = METHOD_COMP, .label = "Component"},
+                    {.id = ID_CHK_ROUND, .method = METHOD_ROUND, .label = "Round", .w = 56},
+                    {.id = ID_CHK_CIRCULAR, .method = METHOD_CIRCULAR, .label = "Circular", .w = 70},
+                    {.id = ID_CHK_TEMPLATE, .method = METHOD_TEMPLATE, .label = "Template", .w = 76},
+                    {.id = ID_CHK_COMP, .method = METHOD_COMP, .label = "Component", .w = 86},
                 }};
                 constexpr int kChkY = 382;
-                constexpr int kChkW = 96;
                 constexpr int kChkH = 22;
+                int chkX = 14;
+                constexpr int kChkGap = 14;
                 for (std::size_t i = 0; i < chk.size(); ++i) {
-                    const int x = 12 + static_cast<int>(i) * (kChkW + 8);
                     g_chkMethod[i] = CreateWindowExA(
-                        0, "BUTTON", chk[i].label, WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, x,
-                        kChkY, kChkW, kChkH, hwnd,
+                        0, "BUTTON", chk[i].label, WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, chkX,
+                        kChkY, chk[i].w, kChkH, hwnd,
                         reinterpret_cast<HMENU>(static_cast<INT_PTR>(chk[i].id)), g_inst, nullptr);
                     SendMessageA(g_chkMethod[i], BM_SETCHECK,
                                  method_enabled(chk[i].method) ? BST_CHECKED : BST_UNCHECKED, 0);
+                    chkX += chk[i].w + kChkGap;
                 }
 
                 // ---- Footer buttons: centered on the actual client width ------
