@@ -18,3 +18,6 @@ build-winbuilder.bat
 .vs/
 *.user
 tune_round.cpp
+
+# Private RE notes from vendor-binary analysis (never commit)
+tools/saa7113-tune/SYNTEK_RE.md
