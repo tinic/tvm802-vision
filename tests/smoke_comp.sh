@@ -59,6 +59,13 @@ FID_REFX=370
 FID_REFY=270
 FID_R=45
 
+# Per-frame regression baseline (tests/corpus/baselines.csv). For comp classes,
+# every (cx, cy, w, h, angle) must match the baseline within tolerance, and
+# (found, method) must match exactly. Catches detector drift that the
+# plausible-aspect floor check would miss. Regenerate after an intentional
+# detector change with tools/regen_baselines.sh.
+BASELINE="$REPO/tests/corpus/baselines.csv"
+
 fail=0
 for subdir in "$CORPUS_ROOT"/*/; do
     [ -d "$subdir" ] || continue
@@ -94,8 +101,60 @@ for subdir in "$CORPUS_ROOT"/*/; do
         # show a few detected rows so a regression is debuggable
         awk -F, 'NR>1 {print "    " $0}' /tmp/smoke_out.csv | head -5
         fail=1
-    else
-        echo "  OK   $class ($label): $found / $n"
+        continue
+    fi
+    echo "  OK   $class ($label): $found / $n"
+
+    # ---- Per-frame regression baseline comparison (comp classes only) -------
+    # found + method must match exactly; cx/cy/w/h/angle within +/- 0.01;
+    # quality within +/- 0.005. Any drift fails the gate and prints the offending
+    # row so the operator can decide if it's an intended change (regen the
+    # baseline) or a regression (debug the detector). Skipped silently if no
+    # baseline file is present yet, or for the fid class (different rig).
+    [ -f "$BASELINE" ] || continue
+    case "$label" in fid) continue ;; esac
+    if ! awk -F, -v cls="$class" -v base="$BASELINE" -v tol=0.01 -v qtol=0.005 '
+        function diff(actual, expected, lbl, file,    d) {
+            d = actual - expected
+            if (d < 0) d = -d
+            if (d > (lbl == "quality" ? qtol : tol)) {
+                printf "  %s  %-7s  %s != %s  (drift %.4f)\n", file, lbl, actual, expected, d
+                bad = 1
+            }
+        }
+        BEGIN {
+            while ((getline line < base) > 0) {
+                if (line ~ /^#/ || line == "") continue
+                split(line, b, ",")
+                if (b[1] == cls) {
+                    k = b[2]
+                    bfound[k] = b[3]; bcx[k] = b[4] + 0; bcy[k] = b[5] + 0
+                    bw[k] = b[6] + 0; bh[k] = b[7] + 0; ba[k] = b[8] + 0
+                    bq[k] = b[9] + 0; bm[k] = b[10]
+                    have[k] = 1
+                }
+            }
+            close(base)
+        }
+        NR > 1 {
+            np = split($1, p, "/"); f = p[np]
+            if (!(f in have)) next  # no baseline for this file -> not gated
+            if ($2 != bfound[f]) { printf "  %s  found    %s != %s\n", f, $2, bfound[f]; bad = 1; next }
+            if ($9 != bm[f])     { printf "  %s  method   %s != %s\n", f, $9, bm[f]; bad = 1 }
+            diff($3, bcx[f], "cx",      f)
+            diff($4, bcy[f], "cy",      f)
+            diff($5, bw[f],  "w",       f)
+            diff($6, bh[f],  "h",       f)
+            diff($7, ba[f],  "angle",   f)
+            diff($8, bq[f],  "quality", f)
+        }
+        END { exit bad + 0 }
+    ' /tmp/smoke_out.csv; then
+        echo "  DRIFT $class -- regression baseline mismatch:"
+        # awk wrote the drift lines to stdout above; if the operator wants the
+        # full csv they can re-run mvision-tune. Suggest the regen path.
+        echo "    (re-pin via tools/regen_baselines.sh if the change is intentional)"
+        fail=1
     fi
 done
 

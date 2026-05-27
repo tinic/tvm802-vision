@@ -337,18 +337,38 @@ double best_angle(const cv::Mat& roi, double priorDeg = std::numeric_limits<doub
     // Fine refine: +/- one coarse step around the winner. Kept serial -- only
     // ~21 trials, all on the calling thread, so dispatch overhead would dwarf
     // the work. The thread_local buffers above carry across from coarse.
-    double refineBest = bestDeg;
-    double refineScore = bestScore;
+    //
+    // Store all fine scores in a row so we can parabolic-interpolate around the
+    // winner (sub-step angle precision). The host's stability gate is 0.225 deg
+    // -- finer than our 0.3 deg fine step -- so without the sub-step refine the
+    // host can't easily get 3 consecutive reads within its tolerance and burns
+    // iterations on quantization noise. Bit-identical at the discrete grid;
+    // gains precision strictly between grid points.
     const int nFine =
         static_cast<int>(std::lround(2.0 * kComp.angleCoarseStepDeg / kComp.angleFineStepDeg));
+    std::vector<double> fineScores(static_cast<size_t>(nFine) + 1);
+    int bestFineI = 0;
+    double refineScore = -1.0;
+    const double fineStart = bestDeg - kComp.angleCoarseStepDeg;
     for (int i = 0; i <= nFine; ++i) {
-        const double deg =
-            bestDeg - kComp.angleCoarseStepDeg + static_cast<double>(i) * kComp.angleFineStepDeg;
+        const double deg = fineStart + static_cast<double>(i) * kComp.angleFineStepDeg;
         const double s = score_at(deg);
+        fineScores[static_cast<size_t>(i)] = s;
         if (s > refineScore) {
             refineScore = s;
-            refineBest = deg;
+            bestFineI = i;
         }
+    }
+    double refineBest = fineStart + static_cast<double>(bestFineI) * kComp.angleFineStepDeg;
+    // Parabolic interpolation around the winner: requires both neighbors so the
+    // boundary cases (i=0 or i=nFine) skip the refine (they'd extrapolate off
+    // the sampled grid; safer to return the discrete max).
+    if (bestFineI > 0 && bestFineI < nFine) {
+        const double a = fineScores[static_cast<size_t>(bestFineI) - 1];
+        const double b = fineScores[static_cast<size_t>(bestFineI)];
+        const double c = fineScores[static_cast<size_t>(bestFineI) + 1];
+        const double subI = parabolic3(a, b, c, bestFineI);
+        refineBest = fineStart + subI * kComp.angleFineStepDeg;
     }
     return refineBest;
 }
