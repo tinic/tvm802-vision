@@ -22,14 +22,16 @@ bool available();
 
 // Set chip controls. Values clamped to the chip's range. Return true on
 // successful I2C write; false if the chip is unreachable.
-bool set_brightness(int v);  // 0..255   (SAA7113 reg 0x0A, default 128)
-bool set_contrast(int v);    // 0..127   (reg 0x0B, default 71)
-bool set_saturation(int v);  // 0..127   (reg 0x0C, default 64)
-bool set_hue(int v);         // -128..127 (reg 0x0D, default 0)
-bool set_gain(int v);        // 0..511   (9-bit GAI18:GAI10/GAI28:GAI20 split,
-                             //           also sets GAFIX=1 = manual gain)
-bool set_agc(bool on);       // true  = GAFIX 0 = AGC drives gain
-                             // false = GAFIX 1 = manual gain in reg 0x04/0x05
+bool set_brightness(int v);   // 0..255   (SAA7113 reg 0x0A, default 128)
+bool set_contrast(int v);     // 0..127   (reg 0x0B, default 71)
+bool set_saturation(int v);   // 0..127   (reg 0x0C, default 64)
+bool set_hue(int v);          // -128..127 (reg 0x0D, default 0)
+bool set_gain(int v);         // 0..511   (9-bit GAI18:GAI10/GAI28:GAI20 split,
+                              //           also sets GAFIX=1 = manual gain)
+bool set_agc(bool on);        // true  = GAFIX 0 = AGC drives gain
+                              // false = GAFIX 1 = manual gain in reg 0x04/0x05
+bool set_sharpness(int v);    // 0..3 (reg 0x09 APER bits): factor 0 / 0.25 / 0.5 / 1.0
+bool set_prefilter(bool on);  // reg 0x09 PREF bit: true = luma low-pass on, false = off
 
 // Last-set value (or chip default if never set this session). The UI
 // uses these to initialise its sliders without doing a chip read at
@@ -40,5 +42,7 @@ int get_saturation();
 int get_hue();
 int get_gain();
 bool get_agc();
+int get_sharpness();
+bool get_prefilter();
 
 }  // namespace camchip

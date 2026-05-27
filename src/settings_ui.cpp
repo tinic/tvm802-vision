@@ -75,9 +75,10 @@ enum : int { ID_TIMER = 1,
              ID_CHK_CIRCULAR = 1105,
              ID_CHK_TEMPLATE = 1106,
              ID_CHK_COMP = 1107,
-             ID_CBO_MODE = 1108,   // "Edit:" detector dropdown
-             ID_TAB = 1109,        // SysTabControl32
-             ID_CHK_AGC = 1110 };  // Camera-tab AGC on/off
+             ID_CBO_MODE = 1108,    // "Edit:" detector dropdown
+             ID_TAB = 1109,         // SysTabControl32
+             ID_CHK_AGC = 1110,     // Camera-tab AGC on/off
+             ID_CHK_PREF = 1111 };  // Camera-tab luma prefilter on/off
 
 // Tab pages. Each existing control (slider, checkbox, header static, info
 // label) is assigned a Tab via kSliderTab[] / kHeaderTab below. On
@@ -107,7 +108,8 @@ enum Kind { K_PX,
             K_STENTHS,
             K_AUTOINT,  // 0 = "Auto", else integer
             K_BLUR,     // 0 = "Auto", else odd kernel "NN px"
-            K_RAW };    // plain integer "NN" (Camera-tab chip registers)
+            K_RAW,      // plain integer "NN" (Camera-tab chip registers)
+            K_APER };   // SAA7113 aperture: 0=off, 1=0.25x, 2=0.5x, 3=1.0x
 enum Idx { S_RMIN,
            S_RMAX,
            S_SYM,
@@ -120,9 +122,10 @@ enum Idx { S_RMIN,
            S_EXPLO,
            S_EXPHI,
            S_BLUR,
-           S_CAM_BRI,   // SAA7113 reg 0x0A
-           S_CAM_CON,   // SAA7113 reg 0x0B
-           S_CAM_GAIN,  // SAA7113 9-bit gain
+           S_CAM_BRI,    // SAA7113 reg 0x0A
+           S_CAM_CON,    // SAA7113 reg 0x0B
+           S_CAM_GAIN,   // SAA7113 9-bit gain
+           S_CAM_SHARP,  // SAA7113 reg 0x09 APER (peaking factor 0/0.25/0.5/1.0)
            S_COUNT };
 
 struct SliderDef {
@@ -152,6 +155,7 @@ const std::array<SliderDef, S_COUNT> kDefs = {{
     {.label = "Cam brightness", .lo = 0, .hi = 255, .kind = K_RAW, .y = 125, .tab = TAB_CAMERA},       // S_CAM_BRI
     {.label = "Cam contrast", .lo = 0, .hi = 127, .kind = K_RAW, .y = 153, .tab = TAB_CAMERA},         // S_CAM_CON
     {.label = "Cam gain", .lo = 0, .hi = 511, .kind = K_RAW, .y = 181, .tab = TAB_CAMERA},             // S_CAM_GAIN
+    {.label = "Cam sharpness", .lo = 0, .hi = 3, .kind = K_APER, .y = 245, .tab = TAB_CAMERA},         // S_CAM_SHARP
 }};
 
 HINSTANCE g_inst = nullptr;
@@ -162,6 +166,7 @@ std::array<HWND, S_COUNT> g_lblName{};
 std::array<HWND, S_COUNT> g_lblVal{};
 HWND g_chkMedian = nullptr;
 HWND g_chkAgc = nullptr;                       // Camera-tab AGC on/off
+HWND g_chkPref = nullptr;                      // Camera-tab luma prefilter on/off
 std::array<HWND, METHOD_COUNT> g_chkMethod{};  // Detector on/off boxes, METHOD_* order
 HBRUSH g_brGreen = nullptr, g_brRed = nullptr;
 HBRUSH g_brPanel = nullptr;  // explicit medium-light grey for the dialog surface --
@@ -269,7 +274,7 @@ HWND make_static(HWND parent, const char* text, int x, int y, int w, int h) {
 // We KNOW which HWNDs live inside the tab at WM_CREATE time -- check the HWND
 // directly against that set and there's no ambiguity.
 bool inside_tab(HWND ctl) {
-    if (ctl == g_chkMedian || ctl == g_lblHelpComp || ctl == g_chkAgc) {
+    if (ctl == g_chkMedian || ctl == g_lblHelpComp || ctl == g_chkAgc || ctl == g_chkPref) {
         return true;
     }
     auto eq = [ctl](HWND h) { return h == ctl; };
@@ -298,6 +303,9 @@ void show_tab(int tab) {
     ShowWindow(g_chkMedian, (tab == TAB_DETECTION) ? SW_SHOWNA : SW_HIDE);
     if (g_chkAgc != nullptr) {
         ShowWindow(g_chkAgc, (tab == TAB_CAMERA) ? SW_SHOWNA : SW_HIDE);
+    }
+    if (g_chkPref != nullptr) {
+        ShowWindow(g_chkPref, (tab == TAB_CAMERA) ? SW_SHOWNA : SW_HIDE);
     }
     if (g_lblHelpComp != nullptr) {
         ShowWindow(g_lblHelpComp,
@@ -377,6 +385,14 @@ std::string format_value(Kind kind, int pos) {
             return std::format("{} px", k);
         }
         case K_RAW: return std::format("{}", pos);  // direct chip-register value
+        case K_APER:
+            switch (pos) {
+                case 0: return "off (0)";
+                case 1: return "0.25x";
+                case 2: return "0.5x";
+                case 3: return "1.0x";
+                default: return std::format("{}", pos);
+            }
     }
     return {};  // unreachable (all Kind values handled); satisfies non-void return analysis
 }
@@ -449,6 +465,8 @@ void apply_from_controls() {
     s.camContrast = static_cast<double>(tb_pos(S_CAM_CON));
     s.camGain = static_cast<double>(tb_pos(S_CAM_GAIN));
     s.camAgc = (SendMessageA(g_chkAgc, BM_GETCHECK, 0, 0) == BST_CHECKED) ? 1.0 : 0.0;
+    s.camSharpness = static_cast<double>(tb_pos(S_CAM_SHARP));
+    s.camPrefilter = (SendMessageA(g_chkPref, BM_GETCHECK, 0, 0) == BST_CHECKED) ? 1.0 : 0.0;
     camchip::set_brightness(static_cast<int>(s.camBrightness));
     camchip::set_contrast(static_cast<int>(s.camContrast));
     camchip::set_agc(s.camAgc > 0.5);
@@ -457,6 +475,8 @@ void apply_from_controls() {
         // otherwise.
         camchip::set_gain(static_cast<int>(s.camGain));
     }
+    camchip::set_sharpness(static_cast<int>(s.camSharpness));
+    camchip::set_prefilter(s.camPrefilter > 0.5);
     set_settings(g_curMode, s);
     refresh_value_labels();
 }
@@ -493,6 +513,16 @@ void update_enabled(int mode) {
         ShowWindow(g_lblHelpComp,
                    (g_curTab == TAB_DETECTION && mode == MODE_COMP) ? SW_SHOWNA : SW_HIDE);
     }
+    // Cam gain is mutually exclusive with AGC: when AGC drives gain the
+    // chip ignores reg 0x04/0x05, so the manual-gain slider has no effect.
+    // Grey it (+ its labels) to make that obvious in the UI.
+    if (g_chkAgc != nullptr) {
+        const BOOL gainEn =
+            (SendMessageA(g_chkAgc, BM_GETCHECK, 0, 0) == BST_CHECKED) ? FALSE : TRUE;
+        EnableWindow(g_tb[S_CAM_GAIN], gainEn);
+        EnableWindow(g_lblName[S_CAM_GAIN], gainEn);
+        EnableWindow(g_lblVal[S_CAM_GAIN], gainEn);
+    }
 }
 
 void controls_from_settings() {
@@ -520,11 +550,13 @@ void controls_from_settings() {
     pos[S_CAM_BRI] = static_cast<int>(std::lround(s.camBrightness));
     pos[S_CAM_CON] = static_cast<int>(std::lround(s.camContrast));
     pos[S_CAM_GAIN] = static_cast<int>(std::lround(s.camGain));
+    pos[S_CAM_SHARP] = static_cast<int>(std::lround(s.camSharpness));
     for (std::size_t i = 0; i < pos.size(); ++i) {
         SendMessageA(g_tb[i], TBM_SETPOS, TRUE, static_cast<LPARAM>(pos[i]));
     }
     SendMessageA(g_chkMedian, BM_SETCHECK, s.medianRings > 0.5 ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageA(g_chkAgc, BM_SETCHECK, s.camAgc > 0.5 ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageA(g_chkPref, BM_SETCHECK, s.camPrefilter > 0.5 ? BST_CHECKED : BST_UNCHECKED, 0);
     // Push this mode's camera config to the chip so switching modes in the
     // dropdown immediately reflects in the live image.
     camchip::set_brightness(static_cast<int>(s.camBrightness));
@@ -533,6 +565,8 @@ void controls_from_settings() {
     if (s.camAgc <= 0.5) {
         camchip::set_gain(static_cast<int>(s.camGain));
     }
+    camchip::set_sharpness(static_cast<int>(s.camSharpness));
+    camchip::set_prefilter(s.camPrefilter > 0.5);
     // Component has no fiducial ring: relabel the two repurposed sliders to the
     // stray-guard knobs. Down modes keep the diameter-bracket labels.
     SetWindowTextA(g_lblName[S_RMIN], comp ? "Search radius" : "Diameter min");
@@ -673,12 +707,16 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
                 // Camera tab: AGC checkbox under the 3 hardware sliders.
                 // Gain slider is moot while AGC=on (chip ignores manual gain).
-                g_chkAgc = CreateWindowExA(0, "BUTTON",
-                                           "AGC -- Automatic Gain Control (uncheck = manual Cam gain)",
+                g_chkAgc = CreateWindowExA(0, "BUTTON", "Cam AGC (auto gain)",
                                            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                                           24, 215, 380, 22, hwnd,
+                                           24, 215, 200, 22, hwnd,
                                            reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_CHK_AGC)),
                                            g_inst, nullptr);
+                g_chkPref = CreateWindowExA(0, "BUTTON", "Cam prefilter (luma low-pass)",
+                                            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                                            24, 273, 240, 22, hwnd,
+                                            reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_CHK_PREF)),
+                                            g_inst, nullptr);
 
                 // ---- Detector master switches: persistent strip below the tabs.
                 // Global setting (uncheck = fall back to stock vision for that
@@ -804,7 +842,10 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 } else if (id == ID_CHK_MEDIAN) {
                     apply_from_controls();  // checkbox toggled
                 } else if (id == ID_CHK_AGC) {
-                    apply_from_controls();  // camera AGC checkbox -> chip + settings
+                    apply_from_controls();      // camera AGC checkbox -> chip + settings
+                    update_enabled(g_curMode);  // grey/ungrey the Cam gain slider
+                } else if (id == ID_CHK_PREF) {
+                    apply_from_controls();  // prefilter checkbox -> chip
                 } else if (id >= ID_CHK_ROUND && id <= ID_CHK_COMP) {
                     const int method = id - ID_CHK_ROUND;  // METHOD_* order matches the ID order
                     const bool on = SendMessageA(g_chkMethod[static_cast<std::size_t>(method)],

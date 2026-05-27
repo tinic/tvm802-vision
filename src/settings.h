@@ -42,6 +42,8 @@ struct Settings {
     double camContrast = 71.0;     // 0..127    (reg 0x0B, default 71)
     double camGain = 117.0;        // 0..511    (9-bit gain; 0 ~= -3 dB, 117 unity, 511 +6 dB)
     double camAgc = 1.0;           // 1 = AGC drives gain, 0 = manual (camGain)
+    double camSharpness = 0.0;     // 0..3 (reg 0x09 APER): factor 0 / 0.25 / 0.5 / 1.0
+    double camPrefilter = 0.0;     // reg 0x09 PREF bit: 1 = luma low-pass on, 0 = off
 };
 
 // Detector modes. Settings are kept PER MODE, so each has an independent tuning.
