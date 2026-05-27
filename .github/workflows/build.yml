@@ -109,12 +109,14 @@ jobs:
       # declared in vcpkg.json (core/imgproc/imgcodecs+png, no dnn -> no
       # protobuf), then configures the x86 static build. Static OpenCV ->
       # MVision.dll is self-contained (no OpenCV runtime DLLs).
-      - name: Configure (x86, static, minimal OpenCV via vcpkg manifest)
+      - name: Configure (x86, static, minimal OpenCV + libusb via vcpkg manifest)
         shell: pwsh
         run: |
           cmake -S . -B build -A Win32 `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT\scripts\buildsystems\vcpkg.cmake" `
-            -DVCPKG_TARGET_TRIPLET=x86-windows-static
+            -DVCPKG_TARGET_TRIPLET=x86-windows-static `
+            -DBUILD_SAA7113_TUNE=ON `
+            -DBUILD_MVISION_GRABBER=ON
 
       - name: Build (Release)
         shell: pwsh
@@ -122,35 +124,65 @@ jobs:
 
       - name: Show result
         shell: pwsh
-        run: Get-ChildItem build\Release\MVision.dll,build\Release\MVision-noavx2.dll | Format-List Name,Length,LastWriteTime
+        run: Get-ChildItem build\Release\*.dll,build\Release\*.ax,build\Release\*.exe | Format-List Name,Length,LastWriteTime
 
-      - name: Upload DLL artifacts
+      - name: Stage release bundle
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path bundle | Out-Null
+          Copy-Item build\Release\MVision.dll          bundle\
+          Copy-Item build\Release\MVision-noavx2.dll   bundle\
+          Copy-Item build\Release\mvision_grabber.ax   bundle\
+          Copy-Item build\Release\saa7113-tune.exe     bundle\
+          Copy-Item install\install.bat                bundle\
+          Copy-Item install\uninstall.bat              bundle\
+          Copy-Item install\INSTALL.md                 bundle\
+          $tag = if ($env:GITHUB_REF -like 'refs/tags/*') { $env:GITHUB_REF -replace 'refs/tags/','' } else { 'dev' }
+          Compress-Archive -Path bundle\* -DestinationPath "tvm802-vision-$tag.zip"
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: MVision-x86
           path: |
             build/Release/MVision.dll
             build/Release/MVision-noavx2.dll
+            build/Release/mvision_grabber.ax
+            build/Release/saa7113-tune.exe
           if-no-files-found: error
 
-      - name: Attach DLLs to Release (tag builds only)
+      - name: Upload release bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: tvm802-vision-bundle
+          path: tvm802-vision-*.zip
+          if-no-files-found: error
+
+      - name: Attach release zip + raw binaries (tag builds only)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: |
+            tvm802-vision-*.zip
             build/Release/MVision.dll
             build/Release/MVision-noavx2.dll
+            build/Release/mvision_grabber.ax
+            build/Release/saa7113-tune.exe
           generate_release_notes: true
           body: |
-            Drop-in OpenCV down-vision fiducial detector for the QiHe TVM802A / TVM802B.
+            ## tvm802-vision — TVM802A / TVM802B vision replacement
 
-            Two builds (same code, same ABI) — download one and, if needed, rename it
-            to `MVision.dll`:
-            - **`MVision.dll`** — AVX2, recommended for any CPU from ~2015 on
-              (Haswell / Zen or newer).
-            - **`MVision-noavx2.dll`** — SSE2 baseline, for older CPUs. Use this if
-              `MVision.dll` crashes with an illegal-instruction fault.
+            Download **`tvm802-vision-<TAG>.zip`** and follow `INSTALL.md` inside.
+            The zip contains the MVision.dll detector replacement, the
+            mvision_grabber.ax DirectShow filter (for real-hardware
+            brightness / contrast / gain through the Ctrl+Alt+M Camera tab),
+            saa7113-tune.exe (standalone tuner), install.bat / uninstall.bat,
+            and INSTALL.md.
 
-            You must supply your own original `MVision.dll` (rename it
-            `MVision-orig.dll`) — see the README for install/build instructions.
-            Built x86, static OpenCV (self-contained).
+            If you only want the detector improvements (no chip-level camera
+            control), the raw binaries are also attached individually:
+            - **`MVision.dll`** — AVX2, any CPU from ~2015 on (Haswell / Zen+)
+            - **`MVision-noavx2.dll`** — SSE2 baseline; required on the
+              TVM802BX's Atom N2800.
+
+            Built x86, static OpenCV + libusb (self-contained).

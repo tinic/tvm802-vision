@@ -106,8 +106,25 @@ produces both `build\Release\MVision.dll` (AVX2) and `build\Release\MVision-noav
 
 ## Install
 
-With SurfaceMount **closed**: back up your `MVision.dll`, rename the original to
-**`MVision-orig.dll`** (same folder), drop in the new `MVision.dll`, and relaunch.
+**Quickest path — release bundle**:
+
+1. Grab **`tvm802-vision-vX.Y.Z.zip`** from the latest [release](https://github.com/tinic/tvm802-vision/releases).
+2. Unzip it anywhere.
+3. Close `SurfaceMount.exe`, right-click **`install.bat` → Run as administrator**.
+4. (Optional, only needed for chip-level Camera-tab tuning) **Zadig** the analog capture board to libusbK — see `INSTALL.md` in the zip for the 30-second walkthrough.
+
+`install.bat` backs up your stock `MVision.dll → MVision-orig.dll` on first run, copies the new detector + DirectShow filter + standalone tuner, and registers the filter. `uninstall.bat` reverses everything.
+
+**Manual install** (if you only want the detector improvements, no DirectShow filter, no chip tuning): with SurfaceMount closed, back up your `MVision.dll`, rename the original to **`MVision-orig.dll`**, drop in the new `MVision.dll`, relaunch.
+
+### What's in the bundle
+
+| File | Required? | What it does |
+|---|---|---|
+| `MVision.dll` / `MVision-noavx2.dll` | yes | Drop-in detector replacement |
+| `mvision_grabber.ax` | for Camera tab | Hardware-real DirectShow source filter (replaces stock Syntek; transparent to SurfaceMount) |
+| `saa7113-tune.exe` | optional | Standalone chip tuner — live preview, hardware brightness/contrast/gain via WinUSB. Useful for offline diagnostic work. |
+| `install.bat` / `uninstall.bat` / `INSTALL.md` | n/a | One-shot install scripts + per-step walkthrough |
 
 ## Tuning
 
@@ -137,6 +154,14 @@ preview also shows the image adjustments live.
 - **Image adjustments** (applied before detection): **gamma, brightness, contrast,
   black/white levels, sharpen,** and a Gaussian **blur** (smooths a speckled or
   specular pad so it reads cleanly).
+- **Camera (chip-side hardware)** — new tab; requires `mvision_grabber.ax`
+  installed + Zadig WinUSB binding (see `INSTALL.md`). **Cam brightness / contrast /
+  gain** are real SAA7113 register writes (not the in-software image adjustments
+  above); **AGC** toggles auto-gain vs the manual Gain slider; **Cam sharpness**
+  drives the chip's analog peaking filter (factor 0 / 0.25x / 0.5x / 1.0x);
+  **Cam prefilter** toggles the chip's luma low-pass. Per-mode + persisted.
+  When unavailable (Zadig not done) the sliders are still visible but moves
+  silently no-op.
 
 > **Stubborn / specular pad not locking?** Raise **Blur** to average out the glare
 > speckle, turn on **median ring scoring**, set the **radius** bracket around the

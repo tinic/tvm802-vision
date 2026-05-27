@@ -8,25 +8,7 @@
 
 cmake_minimum_required(VERSION 3.21)
 
-# libusb-1.0 ships with a CMake config in modern vcpkg ports; fall back to
-# pkg-config (Linux dev box) when find_package can't find it.
-find_package(libusb CONFIG QUIET)
-if(NOT libusb_FOUND)
-    find_package(PkgConfig QUIET)
-    if(PkgConfig_FOUND)
-        pkg_check_modules(LIBUSB IMPORTED_TARGET libusb-1.0)
-    endif()
-    if(NOT TARGET PkgConfig::LIBUSB)
-        message(FATAL_ERROR
-            "libusb-1.0 not found. On vcpkg: add \"libusb\" to vcpkg.json. "
-            "On Linux: apt install libusb-1.0-0-dev.")
-    endif()
-    add_library(saa_libusb INTERFACE)
-    target_link_libraries(saa_libusb INTERFACE PkgConfig::LIBUSB)
-else()
-    add_library(saa_libusb INTERFACE)
-    target_link_libraries(saa_libusb INTERFACE libusb::libusb)
-endif()
+# Uses the top-level `mvision_libusb` INTERFACE target (set in CMakeLists.txt).
 
 set(SAA_SOURCES main.cpp common.cpp)
 if(WIN32)
@@ -37,7 +19,7 @@ else()
 endif()
 
 add_executable(saa7113-tune ${SAA_SOURCES})
-target_link_libraries(saa7113-tune PRIVATE saa_libusb)
+target_link_libraries(saa7113-tune PRIVATE mvision_libusb)
 if(WIN32)
     target_link_libraries(saa7113-tune PRIVATE user32 gdi32)
 endif()

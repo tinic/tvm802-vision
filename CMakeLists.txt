@@ -3,6 +3,7 @@ project(MVision LANGUAGES CXX)
 
 option(BUILD_TESTS "Build the offline OpenCV detector test harness (host arch)" OFF)
 option(BUILD_SAA7113_TUNE "Build the SAA7113 USB tuning utility (needs libusb-1.0)" OFF)
+option(BUILD_MVISION_GRABBER "Build the DirectShow capture filter mvision_grabber.ax (Windows i386 only)" OFF)
 
 # Default to Release for single-config generators (Unix Makefiles, Ninja) when
 # the user hasn't picked one. Without this, an empty CMAKE_BUILD_TYPE means
@@ -49,6 +50,49 @@ endif()
 
 # OpenCV from vcpkg (toolchain file passed on the cmake command line).
 find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs)
+
+# libusb-1.0 -- looked up once and exposed as the `mvision_libusb` INTERFACE
+# target so MVision.dll, mvision_grabber.ax, and saa7113-tune all link
+# against the same library without duplicating the detection logic. Three
+# acceptable paths (first hit wins):
+#   1. Explicit cache vars -DLIBUSB_INCLUDE_DIR + -DLIBUSB_LIBRARY (winbuilder
+#      sets these via build-winbuilder.bat; pre-built static lib at known
+#      paths outside vcpkg).
+#   2. find_package(libusb CONFIG) -- modern vcpkg ports expose this.
+#   3. pkg-config libusb-1.0 -- Linux dev box (apt's libusb-1.0-0-dev) and
+#      older vcpkg ports.
+# Hard requirement: MVision.dll's Camera tab + grabber + tune all need it.
+function(find_mvision_libusb)
+    if(LIBUSB_INCLUDE_DIR AND LIBUSB_LIBRARY)
+        add_library(mvision_libusb INTERFACE)
+        target_include_directories(mvision_libusb INTERFACE ${LIBUSB_INCLUDE_DIR})
+        target_link_libraries(mvision_libusb INTERFACE ${LIBUSB_LIBRARY})
+        message(STATUS "libusb-1.0 via -DLIBUSB_* (${LIBUSB_LIBRARY})")
+        return()
+    endif()
+    find_package(libusb CONFIG QUIET)
+    if(libusb_FOUND)
+        add_library(mvision_libusb INTERFACE)
+        target_link_libraries(mvision_libusb INTERFACE libusb::libusb)
+        message(STATUS "libusb-1.0 via find_package(libusb CONFIG)")
+        return()
+    endif()
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(LIBUSB IMPORTED_TARGET libusb-1.0)
+        if(TARGET PkgConfig::LIBUSB)
+            add_library(mvision_libusb INTERFACE)
+            target_link_libraries(mvision_libusb INTERFACE PkgConfig::LIBUSB)
+            message(STATUS "libusb-1.0 via pkg-config")
+            return()
+        endif()
+    endif()
+    message(FATAL_ERROR
+        "libusb-1.0 not found. On Linux: apt install libusb-1.0-0-dev. "
+        "On Windows (vcpkg): add 'libusb' to vcpkg.json. "
+        "Or pass -DLIBUSB_INCLUDE_DIR + -DLIBUSB_LIBRARY directly.")
+endfunction()
+find_mvision_libusb()
 
 # Threads: the circular-symmetry detector parallelizes its coarse search across
 # cores (std::thread). On Windows this is a no-op; on POSIX it links pthread.
@@ -123,14 +167,13 @@ if(_build_dll)
         add_library(${target} SHARED ${MVISION_SOURCES})
         set_target_properties(${target} PROPERTIES
             OUTPUT_NAME "${output_name}" PREFIX "" SUFFIX ".dll")
-        target_include_directories(${target} PRIVATE src tools/saa7113-tune ${LIBUSB_INCLUDE_DIR})
+        target_include_directories(${target} PRIVATE src tools/saa7113-tune)
         # gdi32: preview.cpp uses GDI (StretchDIBits, GetStockObject, ...).
         # ws2_32 + iphlpapi: controller.cpp reads the px/mm scale from the motion
         # controller (TCP), discovering its endpoint via the host's own connection.
-        # libusb-1.0: camera_chip.cpp opens the chip via WinUSB / libusbK to write
-        # SAA7113 registers. Path passed via -DLIBUSB_INCLUDE_DIR + -DLIBUSB_LIBRARY
-        # on the cmake command line (set in build-winbuilder.bat).
-        target_link_libraries(${target} PRIVATE ${OpenCV_LIBS} Threads::Threads kernel32 user32 gdi32 comctl32 uxtheme ws2_32 iphlpapi ${LIBUSB_LIBRARY} setupapi winusb)
+        # mvision_libusb: camera_chip.cpp opens the chip via WinUSB / libusbK to
+        # write SAA7113 registers (found at top-level via find_mvision_libusb).
+        target_link_libraries(${target} PRIVATE ${OpenCV_LIBS} Threads::Threads kernel32 user32 gdi32 comctl32 uxtheme ws2_32 iphlpapi mvision_libusb setupapi winusb)
         target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS
                                    MVISION_VERSION="${MVISION_VERSION}")
         target_compile_options(${target} PRIVATE ${MVISION_WARNINGS})
@@ -216,4 +259,12 @@ endif()
 # ---------------------------------------------------------------------------
 if(BUILD_SAA7113_TUNE)
     add_subdirectory(tools/saa7113-tune)
+endif()
+
+# ---------------------------------------------------------------------------
+# mvision_grabber.ax -- usermode DirectShow capture filter (Windows x86).
+# CI enables this alongside the MVision.dll build to bundle into the release.
+# ---------------------------------------------------------------------------
+if(BUILD_MVISION_GRABBER)
+    add_subdirectory(tools/mvision-grabber)
 endif()
