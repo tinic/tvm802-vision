@@ -31,6 +31,17 @@ struct Settings {
     double meanLo = 0.0;       // exposure gate: reject frame mean below this; 0 = Auto (default 6)
     double meanHi = 0.0;       // exposure gate: reject frame mean above this; 0 = Auto (default 250)
     double medianRings = 0.0;  // Round: combine rings by MEDIAN (robust to glare) instead of mean; 0 = off, 1 = on
+
+    // SAA7113 hardware controls -- written directly to the chip via WinUSB /
+    // STK1160 I2C-master when the operator changes the slider in the Camera
+    // tab. Per-mode because down-vision (Round/Circular/Template) and up-
+    // vision (Component) usually want different exposure / contrast / gain.
+    // Defaults match the chip's documented post-power-on values; loading
+    // a fresh INI thus leaves the chip alone until the operator tunes.
+    double camBrightness = 128.0;  // 0..255    (SAA7113 reg 0x0A, default 128)
+    double camContrast = 71.0;     // 0..127    (reg 0x0B, default 71)
+    double camGain = 117.0;        // 0..511    (9-bit gain; 0 ~= -3 dB, 117 unity, 511 +6 dB)
+    double camAgc = 1.0;           // 1 = AGC drives gain, 0 = manual (camGain)
 };
 
 // Detector modes. Settings are kept PER MODE, so each has an independent tuning.

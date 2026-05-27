@@ -104,6 +104,12 @@ if(_build_dll)
         src/preview.cpp
         src/controller.cpp
         src/thread_pool.cpp
+        # SAA7113 hardware tuning: chip-side brightness / contrast / gain
+        # written from the Camera tab of the Ctrl+Alt+M dialog. Coexists
+        # with mvision_grabber.ax via libusbK's non-exclusive control
+        # transfers (we never claim_interface here).
+        src/camera_chip.cpp
+        tools/saa7113-tune/common.cpp
     )
 
     # Build one MVision.dll. use_avx2=ON emits AVX2+FMA in OUR translation units
@@ -117,11 +123,14 @@ if(_build_dll)
         add_library(${target} SHARED ${MVISION_SOURCES})
         set_target_properties(${target} PROPERTIES
             OUTPUT_NAME "${output_name}" PREFIX "" SUFFIX ".dll")
-        target_include_directories(${target} PRIVATE src)
+        target_include_directories(${target} PRIVATE src tools/saa7113-tune ${LIBUSB_INCLUDE_DIR})
         # gdi32: preview.cpp uses GDI (StretchDIBits, GetStockObject, ...).
         # ws2_32 + iphlpapi: controller.cpp reads the px/mm scale from the motion
         # controller (TCP), discovering its endpoint via the host's own connection.
-        target_link_libraries(${target} PRIVATE ${OpenCV_LIBS} Threads::Threads kernel32 user32 gdi32 comctl32 uxtheme ws2_32 iphlpapi)
+        # libusb-1.0: camera_chip.cpp opens the chip via WinUSB / libusbK to write
+        # SAA7113 registers. Path passed via -DLIBUSB_INCLUDE_DIR + -DLIBUSB_LIBRARY
+        # on the cmake command line (set in build-winbuilder.bat).
+        target_link_libraries(${target} PRIVATE ${OpenCV_LIBS} Threads::Threads kernel32 user32 gdi32 comctl32 uxtheme ws2_32 iphlpapi ${LIBUSB_LIBRARY} setupapi winusb)
         target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS
                                    MVISION_VERSION="${MVISION_VERSION}")
         target_compile_options(${target} PRIVATE ${MVISION_WARNINGS})

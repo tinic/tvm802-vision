@@ -105,6 +105,14 @@ void assign_kv(Settings& s, const std::string& key, double val) {
         s.meanHi = val;
     } else if (key == "medianRings") {
         s.medianRings = val;
+    } else if (key == "camBrightness") {
+        s.camBrightness = val;
+    } else if (key == "camContrast") {
+        s.camContrast = val;
+    } else if (key == "camGain") {
+        s.camGain = val;
+    } else if (key == "camAgc") {
+        s.camAgc = val;
     }
 }
 
@@ -122,7 +130,11 @@ void write_section(std::ofstream& f, int m, const Settings& s) {
       << "blur=" << s.blur << "\n"
       << "meanLo=" << s.meanLo << "\n"
       << "meanHi=" << s.meanHi << "\n"
-      << "medianRings=" << s.medianRings << "\n\n";
+      << "medianRings=" << s.medianRings << "\n"
+      << "camBrightness=" << s.camBrightness << "\n"
+      << "camContrast=" << s.camContrast << "\n"
+      << "camGain=" << s.camGain << "\n"
+      << "camAgc=" << s.camAgc << "\n\n";
 }
 }  // namespace
 
