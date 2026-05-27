@@ -339,7 +339,7 @@ void up_reference_point(const void* frame, double* refX, double* refY) {
 // GetMin_val) for the SAME frame, plus the host inputs -- the dataset that
 // calibrates the comp packing (kUp* constants) and vets our detector vs the vendor.
 void maybe_log_comp(const void* frame, const vis::CompResult& cr) {
-    if (!cap::comp_enabled()) {
+    if (!cap::armed()) {
         return;
     }
     int idx = cap::next_index();
@@ -553,17 +553,16 @@ void* __stdcall QueryFrame(void* cam, int timeout) {
 // placement via the comp-mode GetOffset packing, with the original called for preview.
 int __stdcall CheckComp(void* f, int hwnd, int w, int h) {
     // Unconditional entry trace + frame snapshot, BEFORE any gate. Even when our
-    // detector bypasses (sentinel absent or "Component" checkbox off), we still
-    // get a log line and PNG, so an offline scan can prove the host DID call
-    // us. Pair with the detailed log line in maybe_log_comp() below.
-    trace_call("CheckComp", std::format("w={},h={},comp={},methodOn={},drive={},thr={},expW={:.3f},expH={:.3f},expA={:.3f}",
-                                        w, h, cap::comp_enabled() ? 1 : 0,
-                                        vis::method_enabled(vis::METHOD_COMP) ? 1 : 0,
-                                        kCompDrive ? 1 : 0, g_compThreshold,
-                                        g_compExpW, g_compExpH, g_compExpA));
+    // detector bypasses (the "Component" checkbox off), we still get a log line
+    // and PNG, so an offline scan can prove the host DID call us. Pair with the
+    // detailed log line in maybe_log_comp() below.
+    trace_call("CheckComp",
+               std::format("w={},h={},methodOn={},drive={},thr={},expW={:.3f},expH={:.3f},expA={:.3f}",
+                           w, h, vis::method_enabled(vis::METHOD_COMP) ? 1 : 0, kCompDrive ? 1 : 0,
+                           g_compThreshold, g_compExpW, g_compExpH, g_compExpA));
     trace_save_frame(f, "CheckCompEntry");
-    // Ctrl+Alt+U one-shot snapshot. Fires BEFORE the comp-enabled gate so a raw
-    // up-cam frame is always captured even when our detector is dormant (the
+    // Ctrl+Alt+U one-shot snapshot. Fires BEFORE the method-enabled gate so a
+    // raw up-cam frame is always captured even when our detector is dormant (the
     // operator just wants to see what the camera sees). The overlay companion
     // (snap_overlay_<idx>.png) is queued via vis::request_overlay_snap() and
     // only written if the prototype detector + preview actually run this round.
@@ -575,10 +574,9 @@ int __stdcall CheckComp(void* f, int hwnd, int w, int h) {
             vis::request_overlay_snap(snapIdx);  // best-effort: cleared if preview skips
         }
     }
-    // Sentinel gate: inert unless the operator opts in. A released DLL carries the
-    // prototype but does nothing up-vision until C:\mvision_capture\comp is created.
-    // The "Component" UI checkbox is an additional off switch (default on).
-    if (!cap::comp_enabled() || !vis::method_enabled(vis::METHOD_COMP)) {
+    // Component detector is on by default; the "Component" UI checkbox is the
+    // operator's single off-switch (toggle in Ctrl+Alt+M -> Detectors strip).
+    if (!vis::method_enabled(vis::METHOD_COMP)) {
         g_resultSrc = ResultSrc::Original;
         vis::release_overlay_snap();  // drop stale handoff; no overlay this round
         return mv::orig::CheckComp(f, hwnd, w, h);

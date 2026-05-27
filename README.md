@@ -43,8 +43,7 @@ preview, and forwards everything else to the original — which you rename to
 - [x] **Down-vision complete** — all three mark modes implemented, field-aware,
   and hardware-validated.
 - [x] **Up-vision component detection** (`CheckComp`) — **drives placement, validated
-  on hardware** (still opt-in via a sentinel file, so a shipped DLL is inert until an
-  operator enables it). A rectilinear-symmetry detector (center + size + angle) with a
+  on hardware**. A rectilinear-symmetry detector (center + size + angle) with a
   minimum-area-rectangle fallback for asymmetric parts; the pose-to-host transform is
   calibrated against the original DLL over hundreds of real reads. It tracks parts to
   sub-pixel, ignores the off-nozzle distractors the stock vision locks onto, and is
@@ -191,11 +190,11 @@ writes:
 
 - `C:\mvision_capture\snap_NNNN.png` — the raw full-frame capture (always).
 - `C:\mvision_capture\snap_overlay_NNNN.png` — the rendered overlay (green
-  body box + arrow + center cross), only when the prototype detector is
-  active (i.e. the `comp` sentinel + the **Component** checkbox are on).
+  body box + arrow + center cross), when the **Component** detector
+  checkbox is on (default).
 
-Independent of the bulk-capture sentinels (`on` / `comp` / `frames`); one
-press = one capture. Pair it with the offline tuner below.
+Independent of the bulk-capture triggers (`on` / `frames`); one press =
+one capture. Pair it with the offline tuner below.
 
 ### Offline component tuner — `mvision-tune`
 

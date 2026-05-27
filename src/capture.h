@@ -21,13 +21,6 @@ bool armed();
 // and can hurt closed-loop responsiveness. Arm 'on' alone for log-only runs.
 bool frames_enabled();
 
-// True if the up-vision component (CheckComp) PROTOTYPE is enabled (trigger:
-// C:\mvision_capture\comp). It gates the WHOLE prototype: with the sentinel absent
-// (the shipped default) CheckComp is a pure passthrough to the original -- our
-// detector never even runs. Create the file to opt in to the shadow detector + its
-// logging. Kept separate from 'on' so a released DLL can carry the prototype inert.
-bool comp_enabled();
-
 // Reserve the next frame index (atomic, capped). Returns the index or -1 when
 // the per-session cap is reached.
 int next_index();
@@ -41,10 +34,7 @@ void log_line(std::string_view line);
 // One-shot up-cam snapshot. The settings-UI thread arms it on Ctrl+Alt+U;
 // the next CheckComp consumes the flag and writes snap_NNNN.png + (best-
 // effort) snap_overlay_NNNN.png. Atomic exchange -- one press, one capture,
-// regardless of whether the bulk-capture sentinels (on / comp / frames)
-// are present. The comp sentinel is still needed for the OVERLAY save
-// (overlay only renders when the prototype detector is active); raw-frame
-// snap_NNNN.png fires unconditionally.
+// regardless of whether the bulk-capture sentinels (on / frames) are present.
 void arm_snap();
 bool consume_snap();
 
