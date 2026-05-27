@@ -1,6 +1,15 @@
 cmake_minimum_required(VERSION 3.21)
 project(MVision LANGUAGES CXX)
 
+# Centralise output: all binaries (incl. subdir targets like the .ax and the
+# .exe under tools/) land in the same dir regardless of where they're
+# defined. VS multi-config appends /Release automatically to the base dir;
+# NMake single-config uses the base dir as-is. (Don't also set the
+# _<CONFIG> vars: on NMake, MODULE libraries pick up _RELEASE while SHARED
+# pick up the base, splitting the output and breaking the bundling step.)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+
 option(BUILD_TESTS "Build the offline OpenCV detector test harness (host arch)" OFF)
 option(BUILD_SAA7113_TUNE "Build the SAA7113 USB tuning utility (needs libusb-1.0)" OFF)
 option(BUILD_MVISION_GRABBER "Build the DirectShow capture filter mvision_grabber.ax (Windows i386 only)" OFF)
