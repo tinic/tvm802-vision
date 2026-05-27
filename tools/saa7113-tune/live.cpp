@@ -37,6 +37,10 @@
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX  // MSVC: keep <windows.h> from defining min/max macros that collide with std::min/max
+// winsock2.h before windows.h: libusb.h's libusb_handle_events_timeout_completed
+// uses `struct timeval`, which on MSVC lives in winsock2.h (mingw pulls it in
+// transitively via sys/time.h, which is why the cross-syntax-check passed).
+#include <winsock2.h>
 #include <windows.h>
 
 #include <algorithm>

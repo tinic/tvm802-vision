@@ -21,7 +21,15 @@
 //   - memory: reference_stk1150_capture_surface
 
 #define WIN32_LEAN_AND_MEAN
+#define NOMINMAX  // keep windows.h from defining min/max macros
 #define INITGUID
+// winsock2.h must come BEFORE windows.h. We don't actually use winsock, but
+// libusb.h declares libusb_handle_events_timeout_completed with `struct
+// timeval *` and expects the caller to have the type already; on Windows
+// that lives in winsock2.h, not windows.h (WIN32_LEAN_AND_MEAN excludes
+// the older winsock.h). mingw's sys/time.h compat header includes it
+// transitively, which is why the syntax-check passed there.
+#include <winsock2.h>
 #include <windows.h>
 #include <objbase.h>
 #include <olectl.h>      // SELFREG_E_CLASS
