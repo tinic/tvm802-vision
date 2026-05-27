@@ -16,22 +16,32 @@ inline constexpr std::uint8_t kSaaDefaultAddr = 0x25;
 
 // SAA7113 control registers we name explicitly. Everything else is reachable
 // via raw write/read.
-inline constexpr std::uint8_t kSaaInputCntl1 = 0x02;  // FUSE+GUDL+MODE
-inline constexpr std::uint8_t kSaaInputCntl2 = 0x03;  // HOLDG+GAFIX+GAI{2,1}8
-inline constexpr std::uint8_t kSaaGainCh1Lo  = 0x04;  // GAI17..GAI10
-inline constexpr std::uint8_t kSaaGainCh2Lo  = 0x05;  // GAI27..GAI20
+inline constexpr std::uint8_t kSaaInputCntl1 = 0x02;  // FUSE+GUDL+MODE (input select + analog filter bypass)
+inline constexpr std::uint8_t kSaaInputCntl2 = 0x03;  // HLNRS+VBSL+WPOFF+HOLDG+GAFIX+GAI28+GAI18
+inline constexpr std::uint8_t kSaaGainCh1Lo  = 0x04;  // GAI17..GAI10 (low 8 bits of ch1 9-bit gain)
+inline constexpr std::uint8_t kSaaGainCh2Lo  = 0x05;  // GAI27..GAI20 (low 8 bits of ch2 9-bit gain)
 inline constexpr std::uint8_t kSaaLumaCntl   = 0x09;
 inline constexpr std::uint8_t kSaaBrightness = 0x0A;  // BRIG7..0, default 0x80
 inline constexpr std::uint8_t kSaaContrast   = 0x0B;  // CONT7..0, default 0x47
 inline constexpr std::uint8_t kSaaSaturation = 0x0C;  // SATN7..0, default 0x40
 inline constexpr std::uint8_t kSaaHue        = 0x0D;  // HUEC7..0, default 0x00
 
+// reg 0x03 bits: AGC control lives here, NOT in reg 0x02 (the FUSE bits in
+// 0x02 are analog filter bypass per datasheet Table 29, not AGC).
+inline constexpr std::uint8_t kSaaGafix = 0x04;  // reg 0x03 bit 2: 1 = use manual gain (0x04/0x05)
+inline constexpr std::uint8_t kSaaHoldg = 0x08;  // reg 0x03 bit 3: 1 = freeze AGC integration
+inline constexpr std::uint8_t kSaaGai18 = 0x01;  // reg 0x03 bit 0: MSB of ch1 9-bit gain
+inline constexpr std::uint8_t kSaaGai28 = 0x02;  // reg 0x03 bit 1: MSB of ch2 9-bit gain
+
 // STK1160 USB / framing constants (datasheet Rev 1.2 + Linux stk1160 driver).
 inline constexpr std::uint8_t  kStkEpVideo    = 0x82;
 inline constexpr std::uint16_t kStkMinPktSize = 3072;
 
+// We use libusb's default context (libusb_init(nullptr)) so the live mode's
+// event-pumping thread can pass nullptr to libusb_handle_events_timeout
+// without us having to thread the context pointer through every layer.
 struct UsbCtx {
-    libusb_context* ctx = nullptr;
+    bool inited = false;
     libusb_device_handle* h = nullptr;
     ~UsbCtx();
     UsbCtx() = default;

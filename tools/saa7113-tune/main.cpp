@@ -38,6 +38,44 @@ int cmd_dump(libusb_device_handle* h, std::uint8_t addr) {
     return 0;
 }
 
+int cmd_descr(libusb_device_handle* h) {
+    libusb_device* dev = libusb_get_device(h);
+    libusb_config_descriptor* cfg = nullptr;
+    if (libusb_get_active_config_descriptor(dev, &cfg) < 0 || cfg == nullptr) {
+        std::println("get_active_config_descriptor failed");
+        return 1;
+    }
+    std::println("config: {} interface(s), bConfigurationValue={}",
+                 int(cfg->bNumInterfaces), int(cfg->bConfigurationValue));
+    for (int ii = 0; ii < cfg->bNumInterfaces; ++ii) {
+        const auto& intf = cfg->interface[ii];
+        std::println("  interface[{}]: {} alt(s)", ii, intf.num_altsetting);
+        for (int a = 0; a < intf.num_altsetting; ++a) {
+            const auto& alt = intf.altsetting[a];
+            std::println("    alt[{}]: bInterfaceNumber={} bAlternateSetting={} bNumEndpoints={}",
+                         a, int(alt.bInterfaceNumber), int(alt.bAlternateSetting),
+                         int(alt.bNumEndpoints));
+            for (int e = 0; e < alt.bNumEndpoints; ++e) {
+                const auto& ep = alt.endpoint[e];
+                int size = ep.wMaxPacketSize & 0x07ff;
+                int xtra = ((ep.wMaxPacketSize >> 11) & 0x3) + 1;
+                std::println("      ep[{}]: addr=0x{:02x} attr=0x{:02x} maxPkt={} (raw=0x{:04x})",
+                             e, int(ep.bEndpointAddress), int(ep.bmAttributes),
+                             size * xtra, int(ep.wMaxPacketSize));
+            }
+        }
+    }
+    libusb_free_config_descriptor(cfg);
+
+    // Probe each alt setting -- print which succeed.
+    std::println("set_interface_alt_setting probe:");
+    for (int a = 0; a < 8; ++a) {
+        int rc = libusb_set_interface_alt_setting(h, 0, a);
+        std::println("  alt {}: {}", a, libusb_error_name(rc));
+    }
+    return 0;
+}
+
 int cmd_scan(libusb_device_handle* h) {
     // Probe 7-bit I2C addresses 0x08..0x77 by attempting a read of subaddr 0
     // and checking whether the transaction completes. A device that ACKs
@@ -45,7 +83,9 @@ int cmd_scan(libusb_device_handle* h) {
     std::println("I2C bus scan (7-bit addresses that ACK):");
     for (std::uint8_t a = 0x08; a <= 0x77; ++a) {
         std::uint8_t v = 0;
-        if (saa_read(h, a, 0x00, v) == 0) {
+        // saa_read returns libusb_control_transfer's byte count on success
+        // (= 1 for a read), negative on failure. Don't check == 0.
+        if (saa_read(h, a, 0x00, v) >= 0) {
             std::println("  0x{:02x}  (reg00=0x{:02x})", a, v);
         }
     }
@@ -105,9 +145,11 @@ void usage(std::string_view argv0) {
         "  {0} [--addr 0x25] hue        0..255   (reg 0x0D)\n"
         "\n"
         "Live preview + interactive REPL:\n"
-        "  {0} [--addr 0x25] live\n"
+        "  {0} [--addr 0x25] [--debug|-d] live\n"
         "    Opens a window streaming UYVY frames over WinUSB. Type tweaks at\n"
         "    the console; effect appears live (no driver swap per tweak).\n"
+        "    --debug adds startup state dump + 1Hz isoc-stats line; can also be\n"
+        "    toggled mid-session via `debug on|off` at the REPL.\n"
         "\n"
         "REG, VAL accept decimal or 0xHEX. --addr defaults to 0x25 (= 8-bit\n"
         "0x4A, SAA7113 RTS0 strapped HIGH); 0x24 is the strap-LOW alternate.\n"
@@ -120,14 +162,26 @@ void usage(std::string_view argv0) {
 
 int main(int argc, char* argv[]) {
     std::uint8_t addr = kSaaDefaultAddr;
+    bool debug = false;
 
+    // Flags (any order, before the subcommand): --addr 0xNN, --debug | -d.
     int argi = 1;
-    if (argi + 1 < argc && std::string_view(argv[argi]) == "--addr") {
-        if (parse_u8(argv[argi + 1], addr) < 0 || addr > 0x7F) {
-            std::println(stderr, "bad --addr value: {}", argv[argi + 1]);
-            return 1;
+    while (argi < argc) {
+        const std::string_view a = argv[argi];
+        if (a == "--addr" && argi + 1 < argc) {
+            if (parse_u8(argv[argi + 1], addr) < 0 || addr > 0x7F) {
+                std::println(stderr, "bad --addr value: {}", argv[argi + 1]);
+                return 1;
+            }
+            argi += 2;
+            continue;
         }
-        argi += 2;
+        if (a == "--debug" || a == "-d") {
+            debug = true;
+            ++argi;
+            continue;
+        }
+        break;
     }
     if (argi >= argc) { usage(argv[0]); return 1; }
     const std::string_view cmd = argv[argi];
@@ -139,6 +193,7 @@ int main(int argc, char* argv[]) {
 
     if (cmd == "dump" && rest == 0)               return cmd_dump(u.h, addr);
     if (cmd == "scan" && rest == 0)               return cmd_scan(u.h);
+    if (cmd == "descr" && rest == 0)              return cmd_descr(u.h);
     if (cmd == "read" && rest == 1)               return cmd_read(u.h, addr, restv[0]);
     if (cmd == "write" && rest == 2)              return cmd_write(u.h, addr, restv[0], restv[1]);
     if (cmd == "brightness" && rest == 1)         return cmd_named(u.h, addr, kSaaBrightness, "Brightness", restv[0]);
@@ -147,7 +202,7 @@ int main(int argc, char* argv[]) {
     if (cmd == "hue" && rest == 1)                return cmd_named(u.h, addr, kSaaHue,        "Hue",        restv[0]);
     if (cmd == "live" && rest == 0) {
 #ifndef SAA_NO_LIVE
-        return run_live(u.h, addr);
+        return run_live(u.h, addr, debug);
 #else
         std::println(stderr, "'live' requires the Win32 build (Windows-only).");
         return 1;

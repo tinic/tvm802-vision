@@ -58,10 +58,11 @@ namespace saa {
 namespace {
 
 // ---- Capture geometry ---------------------------------------------------
-// NTSC 720x480 UYVY. PAL would be 720x576 + a different CFEPO; only NTSC
-// here because the TVM802B is configured for NTSC on the analog side.
+// NTSC 720x480 UYVY interlaced -- BUT the TVM802B's SAA7113 (or current
+// chip config) only delivers one field, so we capture and display 720x240
+// (the chip's odd-field-only output, stretched vertically to fill window).
 constexpr int kFrameW = 720;
-constexpr int kFrameH = 480;
+constexpr int kFrameH = 240;
 constexpr int kBytesPerLine = kFrameW * 2;
 constexpr int kFrameBytes = kBytesPerLine * kFrameH;
 
@@ -123,9 +124,9 @@ struct Frame {
 
 struct State {
     libusb_device_handle* h = nullptr;
-    libusb_context* ctx = nullptr;       // for handle_events_timeout_completed
     std::uint8_t addr = kSaaDefaultAddr;
     std::atomic<bool> running{true};
+    bool debug = false;
 
     // Double-buffered frame: ISOC fills `back`, swaps under mutex on
     // end-of-frame, WM_PAINT reads `front`.
@@ -135,26 +136,47 @@ struct State {
     std::atomic<bool> frontDirty{false};
 
     HWND hwnd = nullptr;
+
+    // Diagnostic counters (atomic so the libusb thread can update freely);
+    // only printed when `debug == true`. Inert otherwise.
+    std::atomic<std::uint64_t> pktTotal{0};
+    std::atomic<std::uint64_t> pktEmpty{0};   // actual_length == 0
+    std::atomic<std::uint64_t> pktShort{0};   // 0 < actual_length <= 4
+    std::atomic<std::uint64_t> pktData{0};    // non-header packets with data
+    std::atomic<std::uint64_t> pktSofC0{0};   // 0xc0 start-of-frame markers
+    std::atomic<std::uint64_t> pktSof80{0};   // 0x80 field markers
+    std::atomic<std::uint64_t> framesDone{0};
+    std::atomic<std::uint64_t> maxLen{0};
 };
 
 // ---- Isoc callback ------------------------------------------------------
 
 void process_packet(State& s, const std::uint8_t* p, int len) {
-    if (len <= 4) return;
+    s.pktTotal.fetch_add(1, std::memory_order_relaxed);
+    auto mx = s.maxLen.load(std::memory_order_relaxed);
+    while (std::uint64_t(len) > mx &&
+           !s.maxLen.compare_exchange_weak(mx, std::uint64_t(len))) {}
+    if (len == 0) { s.pktEmpty.fetch_add(1, std::memory_order_relaxed); return; }
+    if (len <= 4) { s.pktShort.fetch_add(1, std::memory_order_relaxed); return; }
     if (p[0] == 0xc0) {
-        // End-of-frame: swap back -> front under lock, signal repaint.
+        s.pktSofC0.fetch_add(1, std::memory_order_relaxed);
+        // End-of-frame: swap back -> front under lock, signal repaint via
+        // PostMessage (documented way to nudge the GUI thread from a worker).
         {
             std::lock_guard lk(s.frameMu);
             std::swap(s.back, s.front);
             s.back.pos = 0;
             s.back.bytesused = 0;
         }
+        s.framesDone.fetch_add(1, std::memory_order_relaxed);
         s.frontDirty.store(true, std::memory_order_release);
         if (s.hwnd != nullptr) {
-            // PostMessage is the documented way to nudge the GUI thread
-            // from a worker.
             PostMessage(s.hwnd, WM_APP + 1, 0, 0);
         }
+    } else if (p[0] == 0x80) {
+        s.pktSof80.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        s.pktData.fetch_add(1, std::memory_order_relaxed);
     }
     if (p[0] == 0xc0 || p[0] == 0x80) {
         s.back.odd = (p[0] & 0x40) != 0;
@@ -167,13 +189,13 @@ void process_packet(State& s, const std::uint8_t* p, int len) {
     int remain = len - hdr;
     const std::uint8_t* src = p + hdr;
 
+    // The TVM802B's SAA7113 (or its config) only emits the odd field --
+    // never the 0x80 even-field marker -- so we have ONE field per frame
+    // marker (= 240 lines for NTSC). Pack them consecutively into the top
+    // half of the buffer; render scales 720x240 up to window size.
     int linesdone = s.back.pos / kBytesPerLine;
     int lineoff = s.back.pos % kBytesPerLine;
-
-    // odd field on top (even line numbers 0,2,...), even field below
-    // (odd line numbers 1,3,...): the same alternation Linux uses.
-    int dstLine = linesdone * 2 + (s.back.odd ? 0 : 1);
-    int dstOff = dstLine * kBytesPerLine + lineoff;
+    int dstOff = linesdone * kBytesPerLine + lineoff;
 
     while (remain > 0) {
         if (dstOff >= kFrameBytes) return;
@@ -188,8 +210,7 @@ void process_packet(State& s, const std::uint8_t* p, int len) {
         s.back.bytesused += lencopy;
         lineoff = 0;
         ++linesdone;
-        dstLine = linesdone * 2 + (s.back.odd ? 0 : 1);
-        dstOff = dstLine * kBytesPerLine;
+        dstOff = linesdone * kBytesPerLine;
     }
 }
 
@@ -245,29 +266,22 @@ int pick_alt_setting(libusb_device_handle* h, int& outMaxPkt) {
 // ---- UYVY -> BGR conversion + repaint ----------------------------------
 
 // UYVY: each 4 bytes = U Y0 V Y1 -> two BGR pixels.
+//
+// The TVM802B's cameras are monochrome (no chroma signal carried), so the
+// chroma calculation is wasted work and the standard BT.601 limited-range
+// formula (`B = (298*(Y-16) + ...) >> 8`) over-stretches the image -- it
+// expects Y in [16..235] but the SAA7113 here outputs essentially full-
+// range Y. The stretch clamps both ends and looks "very contrasty". So:
+// take Y straight through (B = G = R = Y), drop the chroma math entirely.
 void uyvy_to_bgr(const std::uint8_t* uyvy, std::uint8_t* bgr, int w, int h) {
     for (int y = 0; y < h; ++y) {
         const std::uint8_t* sp = uyvy + y * w * 2;
         std::uint8_t* dp = bgr + y * w * 3;
         for (int x = 0; x < w; x += 2) {
-            int u  = sp[0] - 128;
-            int y0 = sp[1];
-            int v  = sp[2] - 128;
-            int y1 = sp[3];
-            auto cvt = [&](int Y, int& B, int& G, int& R) {
-                int c = Y - 16;
-                B = (298 * c + 516 * u + 128) >> 8;
-                G = (298 * c - 100 * u - 208 * v + 128) >> 8;
-                R = (298 * c + 409 * v + 128) >> 8;
-                B = std::clamp(B, 0, 255);
-                G = std::clamp(G, 0, 255);
-                R = std::clamp(R, 0, 255);
-            };
-            int B, G, R;
-            cvt(y0, B, G, R);
-            dp[0] = std::uint8_t(B); dp[1] = std::uint8_t(G); dp[2] = std::uint8_t(R);
-            cvt(y1, B, G, R);
-            dp[3] = std::uint8_t(B); dp[4] = std::uint8_t(G); dp[5] = std::uint8_t(R);
+            std::uint8_t y0 = sp[1];
+            std::uint8_t y1 = sp[3];
+            dp[0] = dp[1] = dp[2] = y0;
+            dp[3] = dp[4] = dp[5] = y1;
             sp += 4;
             dp += 6;
         }
@@ -327,7 +341,8 @@ HWND create_window(State& s) {
     wc.lpszClassName = "Saa7113Preview";
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     RegisterClassA(&wc);
-    RECT rc{0, 0, kFrameW, kFrameH};
+    // Window opens at 720x480 (display aspect for single-field 720x240).
+    RECT rc{0, 0, kFrameW, kFrameH * 2};
     AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
     HWND h = CreateWindowA("Saa7113Preview", "saa7113-tune live preview",
                            WS_OVERLAPPEDWINDOW | WS_VISIBLE,
@@ -347,12 +362,15 @@ void repl_help() {
         "  c NNN  / contrast NNN     reg 0x0B\n"
         "  s NNN  / saturation NNN   reg 0x0C\n"
         "  h NNN  / hue NNN          reg 0x0D\n"
-        "  g NNN  / gain NNN         reg 0x04+0x05 manual gain, disables AGC\n"
-        "  agc on|off                FUSE bits in reg 0x02\n"
+        "  g NNN  / gain NNN         9-bit manual gain 0..511 (~-3..+6 dB; sets GAFIX)\n"
+        "  agc on|off                GAFIX bit in reg 0x03 (1 = manual gain, 0 = AGC)\n"
+        "  hold on|off               HOLDG bit in reg 0x03 (1 = freeze AGC integration)\n"
         "  i 0..3 / input 0..3       AI11/AI12/AI21/AI22 select in reg 0x02\n"
         "  w REG VAL / write REG VAL raw SAA7113 register write (hex or dec)\n"
         "  r REG     / read REG      raw read\n"
         "  d         / dump          all 128 SAA7113 registers\n"
+        "  hist                      Y-channel min/max/mean + 16-bin histogram\n"
+        "  debug on|off              toggle 1Hz isoc stats line\n"
         "  ?         / help\n"
         "  q         / quit");
 }
@@ -387,27 +405,59 @@ void repl_thread(State& s) {
         if (cmd == "s" || cmd == "saturation") { write_named(kSaaSaturation, "saturation", a1); continue; }
         if (cmd == "h" || cmd == "hue")        { write_named(kSaaHue,        "hue",        a1); continue; }
         if (cmd == "g" || cmd == "gain") {
-            // Manual gain: disable AGC (FUSE=10 in reg 0x02) + write same gain
-            // to both channels. NB: this also forces MODE bits -- read+modify+
-            // write reg 0x02 to preserve input selection.
-            std::uint8_t v = 0;
-            if (parse_u8(a1, v) < 0) { std::println("  bad gain"); continue; }
-            std::uint8_t inp = 0;
-            saa_read(s.h, s.addr, kSaaInputCntl1, inp);
-            std::uint8_t fix = std::uint8_t((inp & 0x3f) | 0x80);  // FUSE=10
-            saa_write(s.h, s.addr, kSaaInputCntl1, fix);
-            saa_write(s.h, s.addr, kSaaGainCh1Lo, v);
-            saa_write(s.h, s.addr, kSaaGainCh2Lo, v);
-            std::println("  gain {} written to ch1+ch2 (AGC fixed)", int(v));
+            // Manual gain: set GAFIX=1 in reg 0x03 (selects manual gain over
+            // AGC), then write the low 8 bits of the 9-bit gain to 0x04/0x05
+            // and the MSB (GAI18/GAI28) into reg 0x03 bits 0/1.
+            // Per datasheet Table 31 (SA 04): 9-bit decimal 0 ≈ -3dB,
+            // 117 ≈ 0dB (unity), 511 ≈ +6dB. Argument is the FULL 9-bit
+            // value 0..511. Accept "g NNN" decimal or "g 0xHHH" hex.
+            char* end = nullptr;
+            unsigned long g9 = std::strtoul(a1.c_str(), &end, 0);
+            if (end == a1.c_str() || g9 > 0x1ff) {
+                std::println("  bad gain (need 0..511)"); continue;
+            }
+            std::uint8_t lo = std::uint8_t(g9 & 0xff);
+            std::uint8_t msb = std::uint8_t((g9 >> 8) & 0x01);
+            std::uint8_t cur = 0;
+            saa_read(s.h, s.addr, kSaaInputCntl2, cur);
+            std::uint8_t nv = std::uint8_t(
+                (cur & ~(kSaaGafix | kSaaGai18 | kSaaGai28))
+                | kSaaGafix
+                | (msb ? kSaaGai18 : 0)
+                | (msb ? kSaaGai28 : 0));
+            saa_write(s.h, s.addr, kSaaInputCntl2, nv);
+            saa_write(s.h, s.addr, kSaaGainCh1Lo, lo);
+            saa_write(s.h, s.addr, kSaaGainCh2Lo, lo);
+            std::println("  gain {} -> reg0x03=0x{:02x} GAI1=GAI2=0x{:02x} (GAFIX set)",
+                         g9, nv, lo);
             continue;
         }
         if (cmd == "agc") {
-            std::uint8_t inp = 0;
-            saa_read(s.h, s.addr, kSaaInputCntl1, inp);
-            std::uint8_t fuse = (a1 == "on") ? 0xc0 : 0x80;  // 11=AGC, 10=fixed
-            std::uint8_t nv = std::uint8_t((inp & 0x3f) | fuse);
-            saa_write(s.h, s.addr, kSaaInputCntl1, nv);
-            std::println("  reg 0x02 <- 0x{:02x}  (AGC {})", nv, a1);
+            // AGC control is GAFIX (reg 0x03 bit 2): 0 = AGC drives gain,
+            // 1 = manual gain in 0x04/0x05 used. (FUSE bits in reg 0x02
+            // are analog filter bypass per datasheet Table 29, NOT AGC.)
+            std::uint8_t cur = 0;
+            saa_read(s.h, s.addr, kSaaInputCntl2, cur);
+            std::uint8_t nv = (a1 == "on")
+                                  ? std::uint8_t(cur & ~kSaaGafix)
+                                  : std::uint8_t(cur |  kSaaGafix);
+            saa_write(s.h, s.addr, kSaaInputCntl2, nv);
+            std::println("  reg 0x03 <- 0x{:02x}  (GAFIX {} -> AGC {})",
+                         nv, (nv & kSaaGafix) ? "1" : "0", a1);
+            continue;
+        }
+        if (cmd == "hold") {
+            // HOLDG (reg 0x03 bit 3): 1 = freeze AGC integration at current
+            // value, 0 = AGC continues updating. Useful for fixing the
+            // working AGC value without switching to manual.
+            std::uint8_t cur = 0;
+            saa_read(s.h, s.addr, kSaaInputCntl2, cur);
+            std::uint8_t nv = (a1 == "on")
+                                  ? std::uint8_t(cur |  kSaaHoldg)
+                                  : std::uint8_t(cur & ~kSaaHoldg);
+            saa_write(s.h, s.addr, kSaaInputCntl2, nv);
+            std::println("  reg 0x03 <- 0x{:02x}  (HOLDG {})",
+                         nv, (nv & kSaaHoldg) ? "on" : "off");
             continue;
         }
         if (cmd == "i" || cmd == "input") {
@@ -434,6 +484,138 @@ void repl_thread(State& s) {
             int rc = saa_read(s.h, s.addr, reg, v);
             if (rc < 0) std::println("  read failed: {}", libusb_error_name(rc));
             else        std::println("  0x{:02x} = 0x{:02x} ({})", reg, v, v);
+            continue;
+        }
+        if (cmd == "sw" || cmd == "stkwrite") {
+            // Raw STK1160 register write: sw REG VAL  (REG is hex, e.g. 0x000).
+            std::uint8_t val = 0;
+            char* end = nullptr;
+            unsigned long reg = std::strtoul(a1.c_str(), &end, 0);
+            if (end == a1.c_str() || reg > 0xffff || parse_u8(a2, val) < 0) {
+                std::println("  bad arg (need REG VAL)"); continue;
+            }
+            int rc = stk_write_reg(s.h, std::uint16_t(reg), val);
+            std::println("  stk {:03x} <- {:02x} ({})", reg, val,
+                         rc < 0 ? libusb_error_name(rc) : "ok");
+            continue;
+        }
+        if (cmd == "sr" || cmd == "stkread") {
+            std::uint8_t val = 0;
+            char* end = nullptr;
+            unsigned long reg = std::strtoul(a1.c_str(), &end, 0);
+            if (end == a1.c_str() || reg > 0xffff) { std::println("  bad reg"); continue; }
+            int rc = stk_read_reg(s.h, std::uint16_t(reg), val);
+            if (rc < 0) std::println("  read failed: {}", libusb_error_name(rc));
+            else        std::println("  stk {:03x} = {:02x}", reg, val);
+            continue;
+        }
+        if (cmd == "gpio_scan" || cmd == "gscan") {
+            // For each of the 10 GPIO pins, try driving HIGH then LOW;
+            // after a settle, read SAA7113 status reg 0x1f. Print any
+            // combo where HLCK transitions from 1 (unlocked) to 0 (locked).
+            // Restores original GCTRL state on exit.
+            std::uint8_t gv0=0, gv1=0, gd0=0, gd1=0;
+            stk_read_reg(s.h, 0x000, gv0); stk_read_reg(s.h, 0x001, gv1);
+            stk_read_reg(s.h, 0x002, gd0); stk_read_reg(s.h, 0x003, gd1);
+            std::println("  saved GV={:02x}{:02x} GDIR={:02x}{:02x}", gv1, gv0, gd1, gd0);
+            auto check = [&](const char* tag) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(150));
+                std::uint8_t st = 0;
+                if (saa_read(s.h, s.addr, 0x1f, st) < 0) return;
+                int hlck = (st >> 7) & 1;
+                int hlvln = (st >> 6) & 1;
+                std::println("    {} -> reg1f=0x{:02x} HLCK={} HLVLN={}{}",
+                             tag, st, hlck, hlvln, (hlck == 0 && hlvln == 0) ? "  *** LOCKED ***" : "");
+            };
+            // Pin-by-pin scan, GPIO 0..7 only (8/9 are typically straps).
+            for (int pin = 0; pin < 8; ++pin) {
+                std::println("  pin {}:", pin);
+                // Force pin to output.
+                stk_write_reg(s.h, 0x002, std::uint8_t(0x01 << pin));
+                stk_write_reg(s.h, 0x000, std::uint8_t(0x01 << pin)); check("  HIGH");
+                stk_write_reg(s.h, 0x000, 0x00);                       check("  LOW ");
+            }
+            // Also try ALL HIGH + ALL LOW.
+            stk_write_reg(s.h, 0x002, 0xff);
+            stk_write_reg(s.h, 0x000, 0xff); check("ALL 8 HIGH");
+            stk_write_reg(s.h, 0x000, 0x00); check("ALL 8 LOW ");
+            // Restore.
+            stk_write_reg(s.h, 0x000, gv0); stk_write_reg(s.h, 0x001, gv1);
+            stk_write_reg(s.h, 0x002, gd0); stk_write_reg(s.h, 0x003, gd1);
+            std::println("  restored.");
+            continue;
+        }
+        if (cmd == "debug") {
+            s.debug = (a1 == "on");
+            std::println("  debug {}", s.debug ? "on" : "off");
+            continue;
+        }
+        if (cmd == "sleep") {
+            // Pause the REPL for N ms (mostly for scripted runs piping in
+            // commands). NB: doesn't pause isoc/window threads.
+            char* end = nullptr;
+            unsigned long ms = std::strtoul(a1.c_str(), &end, 0);
+            if (end != a1.c_str() && ms <= 60000) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+            }
+            continue;
+        }
+        if (cmd == "hist") {
+            // Per-channel min/max/mean + a Y-channel 16-bin histogram. UYVY
+            // layout: U Y0 V Y1, so byte offsets 0/2 are chroma, 1/3 are
+            // luma. For a monochrome camera U,V should sit at ~128 (chroma
+            // null); deviation suggests they carry extra info (or the chip
+            // is decoding stray chroma off composite noise).
+            struct ChanStat {
+                int min = 255, max = 0;
+                std::uint64_t sum = 0;
+                std::uint64_t count = 0;
+                void add(int v) {
+                    if (v < min) min = v;
+                    if (v > max) max = v;
+                    sum += std::uint64_t(v);
+                    ++count;
+                }
+                double mean() const { return count ? double(sum) / double(count) : 0.0; }
+            };
+            ChanStat U, Y, V;
+            std::array<std::uint64_t, 16> ybins{};
+            {
+                std::lock_guard lk(s.frameMu);
+                const std::uint8_t* p = s.front.uyvy.data();
+                const int n = int(s.front.uyvy.size());
+                for (int i = 0; i + 3 < n; i += 4) {
+                    U.add(p[i + 0]);
+                    Y.add(p[i + 1]);
+                    V.add(p[i + 2]);
+                    Y.add(p[i + 3]);
+                    ybins[std::size_t(p[i + 1] >> 4)]++;
+                    ybins[std::size_t(p[i + 3] >> 4)]++;
+                }
+            }
+            if (Y.count == 0) { std::println("  no frame yet"); continue; }
+            std::println("  Y: min={:3} max={:3} mean={:6.1f}  ({} samples)", Y.min, Y.max, Y.mean(), Y.count);
+            std::println("  U: min={:3} max={:3} mean={:6.1f}  ({} samples)  [128 = neutral]",
+                         U.min, U.max, U.mean(), U.count);
+            std::println("  V: min={:3} max={:3} mean={:6.1f}  ({} samples)  [128 = neutral]",
+                         V.min, V.max, V.mean(), V.count);
+            std::println("  Y histogram (16 bins of 16):");
+            std::uint64_t maxbin = 0;
+            for (auto v : ybins) if (v > maxbin) maxbin = v;
+            for (std::size_t b = 0; b < ybins.size(); ++b) {
+                int barlen = maxbin ? int((ybins[b] * 40) / maxbin) : 0;
+                std::string bar(std::size_t(barlen), '#');
+                std::println("    {:3}-{:3}: {:>7} {}",
+                             int(b * 16), int(b * 16 + 15), ybins[b], bar);
+            }
+            continue;
+        }
+        if (cmd == "lock") {
+            std::uint8_t v = 0;
+            if (saa_read(s.h, s.addr, 0x1f, v) >= 0) {
+                std::println("  SAA7113 reg1f=0x{:02x}  HLCK={} HLVLN={} RDCAP={}",
+                             v, (v >> 7) & 1, (v >> 6) & 1, v & 1);
+            }
             continue;
         }
         if (cmd == "d" || cmd == "dump") {
@@ -470,25 +652,32 @@ int write_i2c_seq(libusb_device_handle* h, std::uint8_t addr, std::span<const Re
 
 }  // namespace
 
-int run_live(libusb_device_handle* h, std::uint8_t addr) {
+int run_live(libusb_device_handle* h, std::uint8_t addr, bool debug) {
     State s;
     s.h = h;
-    s.ctx = libusb_get_context(libusb_get_device(h));
     s.addr = addr;
+    s.debug = debug;
     s.back.uyvy.assign(std::size_t(kFrameBytes), 0);
     s.front.uyvy.assign(std::size_t(kFrameBytes), 0);
 
-    // 1. Reset STK1160 housekeeping.
-    if (write_seq(h, kStkResetSeq) < 0) {
-        std::println(stderr, "STK1160 reset register sequence failed");
-        return 1;
+    if (debug) {
+        std::uint8_t st = 0;
+        if (saa_read(h, addr, 0x1f, st) >= 0) {
+            std::println("SAA7113 reg1f=0x{:02x}  HLCK={} HLVLN={} RDCAP={}",
+                         st, (st >> 7) & 1, (st >> 6) & 1, st & 1);
+        }
+        std::uint8_t gv0=0, gv1=0, gd0=0, gd1=0;
+        stk_read_reg(h, 0x000, gv0); stk_read_reg(h, 0x001, gv1);
+        stk_read_reg(h, 0x002, gd0); stk_read_reg(h, 0x003, gd1);
+        std::println("GCTRL: GV={:02x}{:02x} GDIR={:02x}{:02x}", gv1, gv0, gd1, gd0);
     }
-    // 2. SAA7113 cold init.
-    if (write_i2c_seq(h, addr, kSaa7113Init) < 0) {
-        std::println(stderr, "SAA7113 init sequence failed -- wrong I2C addr? Try --addr 0x24");
-        return 1;
-    }
-    // 3. NTSC capture window.
+
+    // Skip the STK1160 reset and SAA7113 cold init -- the chip stays powered
+    // across the Zadig WinUSB swap, so previous (working) state from Syntek
+    // is preserved. Our cold-init sequence (Linux saa7115_init) forces
+    // MODE=AI21 + AUFD=1, which on the TVM802B (camera on AI11, no auto-
+    // detectable signal) silently breaks sync and produces empty USB packets.
+    // We only program the streaming-side bits.
     if (write_seq(h, kStkCaptureNtsc) < 0) {
         std::println(stderr, "capture-window sequence failed");
         return 1;
@@ -500,22 +689,30 @@ int run_live(libusb_device_handle* h, std::uint8_t addr) {
         std::println(stderr, "no suitable isoc alt setting found on EP 0x{:02x}", kStkEpVideo);
         return 1;
     }
-    std::println("alt setting {} -- isoc EP 0x{:02x} maxPkt={}", alt, kStkEpVideo, maxPkt);
-
-    if (libusb_claim_interface(h, 0) < 0) {
-        std::println(stderr, "claim_interface(0) failed");
-        return 1;
-    }
-    if (libusb_set_interface_alt_setting(h, 0, alt) < 0) {
-        std::println(stderr, "set_alt({}) failed", alt);
-        return 1;
+    if (debug) {
+        std::println("alt setting {} -- isoc EP 0x{:02x} maxPkt={}", alt, kStkEpVideo, maxPkt);
     }
 
-    // 5. Kick streaming.
-    stk_write_reg(h, 0x100, 0xb3);  // DCTRL
-    stk_write_reg(h, 0x103, 0x00);  // DCTRL+3
+    int cl = libusb_claim_interface(h, 0);
+    if (cl < 0) {
+        std::println(stderr, "claim_interface(0) failed: {}", libusb_error_name(cl));
+        return 1;
+    }
+    int sa = libusb_set_interface_alt_setting(h, 0, alt);
+    if (sa < 0) {
+        if (debug) {
+            std::println(stderr, "set_interface_alt_setting(0, {}) failed: {} -- "
+                                 "falling back to raw SET_INTERFACE ctrl-xfer",
+                                 alt, libusb_error_name(sa));
+        }
+        sa = libusb_control_transfer(h, 0x01, 0x0B, std::uint16_t(alt), 0, nullptr, 0, 1000);
+        if (sa < 0) {
+            std::println(stderr, "raw SET_INTERFACE also failed: {}", libusb_error_name(sa));
+            return 1;
+        }
+    }
 
-    // 6. Submit isoc URBs.
+    // 5. Submit isoc URBs FIRST (URBs pending, ready to receive)...
     std::vector<libusb_transfer*> xfers(kNumBufs, nullptr);
     std::vector<std::vector<std::uint8_t>> bufs(kNumBufs);
     for (int i = 0; i < kNumBufs; ++i) {
@@ -531,12 +728,38 @@ int run_live(libusb_device_handle* h, std::uint8_t addr) {
         }
     }
 
+    // 6. ... THEN kick streaming. Matches Linux stk1160_start_streaming.
+    stk_write_reg(h, 0x100, 0xb3);  // DCTRL
+    stk_write_reg(h, 0x103, 0x00);  // DCTRL+3
+
     // 7. Window + threads.
     s.hwnd = create_window(s);
     std::thread tEvt([&]{
         while (s.running.load(std::memory_order_acquire)) {
             timeval tv{0, 50000};
-            libusb_handle_events_timeout_completed(s.ctx, &tv, nullptr);
+            libusb_handle_events_timeout_completed(nullptr, &tv, nullptr);
+        }
+    });
+    // 1Hz isoc-stats line so it's obvious whether data is flowing. Off by
+    // default; -d/--debug or `debug on` at the REPL toggles it.
+    std::thread tStats([&]{
+        std::uint64_t lastTotal = 0, lastFrames = 0;
+        while (s.running.load(std::memory_order_acquire)) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            if (!s.debug) {
+                lastTotal = s.pktTotal.load();
+                lastFrames = s.framesDone.load();
+                continue;
+            }
+            auto tot = s.pktTotal.load();
+            auto fr  = s.framesDone.load();
+            std::println("isoc: pkts/s={} maxLen={} (empty={} short={} data={} sof_c0={} sof_80={}) frames/s={}",
+                         tot - lastTotal, s.maxLen.load(),
+                         s.pktEmpty.load(), s.pktShort.load(), s.pktData.load(),
+                         s.pktSofC0.load(), s.pktSof80.load(),
+                         fr - lastFrames);
+            lastTotal = tot;
+            lastFrames = fr;
         }
     });
     std::thread tRepl([&]{ repl_thread(s); });
@@ -551,11 +774,12 @@ int run_live(libusb_device_handle* h, std::uint8_t addr) {
     // Cancel + drain.
     for (auto* x : xfers) if (x) libusb_cancel_transfer(x);
     timeval tv{0, 500000};
-    libusb_handle_events_timeout_completed(s.ctx, &tv, nullptr);
+    libusb_handle_events_timeout_completed(nullptr, &tv, nullptr);
     for (auto* x : xfers) if (x) libusb_free_transfer(x);
 
     libusb_release_interface(h, 0);
     if (tEvt.joinable()) tEvt.join();
+    if (tStats.joinable()) tStats.join();
     if (tRepl.joinable()) tRepl.detach();  // blocked on stdin; OS will tear down
     return 0;
 }
