@@ -117,10 +117,6 @@ void assign_kv(Settings& s, const std::string& key, double val) {
         s.camSharpness = val;
     } else if (key == "camPrefilter") {
         s.camPrefilter = val;
-    } else if (key == "camWpoff") {
-        s.camWpoff = val;
-    } else if (key == "camHlnrs") {
-        s.camHlnrs = val;
     }
 }
 
@@ -144,9 +140,7 @@ void write_section(std::ofstream& f, int m, const Settings& s) {
       << "camGain=" << s.camGain << "\n"
       << "camAgc=" << s.camAgc << "\n"
       << "camSharpness=" << s.camSharpness << "\n"
-      << "camPrefilter=" << s.camPrefilter << "\n"
-      << "camWpoff=" << s.camWpoff << "\n"
-      << "camHlnrs=" << s.camHlnrs << "\n\n";
+      << "camPrefilter=" << s.camPrefilter << "\n\n";
 }
 }  // namespace
 

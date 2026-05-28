@@ -44,8 +44,6 @@ struct Settings {
     double camAgc = 1.0;           // 1 = AGC drives gain, 0 = manual (camGain)
     double camSharpness = 0.0;     // 0..3 (reg 0x09 APER): factor 0 / 0.25 / 0.5 / 1.0
     double camPrefilter = 0.0;     // reg 0x09 PREF bit: 1 = luma low-pass on, 0 = off
-    double camWpoff = 0.0;         // reg 0x03 WPOFF: 1 = AGC ignores white peaks
-    double camHlnrs = 0.0;         // reg 0x03 HLNRS: 1 = "reference select" clamp on H unlock
 };
 
 // Detector modes. Settings are kept PER MODE, so each has an independent tuning.

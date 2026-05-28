@@ -31,8 +31,6 @@ struct State {
     bool agc = true;
     int sharpness = 0;       // APER bits in reg 0x09: 0=off, 1=0.25x, 2=0.5x, 3=1.0x
     bool prefilter = false;  // PREF bit in reg 0x09
-    bool wpoff = false;      // WPOFF bit in reg 0x03 (1 = AGC ignores white peaks)
-    bool hlnrs = false;      // HLNRS bit in reg 0x03 (1 = ref-select clamp when H unlocked)
 };
 
 // SAA7113 Luminance Control (reg 0x09) bit positions, per datasheet Table 36.
@@ -200,47 +198,6 @@ bool set_prefilter(bool on) {
     const std::uint8_t nv = on ? static_cast<std::uint8_t>(cur | kSaaPrefMask)
                                : static_cast<std::uint8_t>(cur & ~kSaaPrefMask);
     return saa::saa_write(h, addr, saa::kSaaLumaCntl, nv) >= 0;
-}
-
-// WPOFF and HLNRS both live in reg 0x03 (AICO2), shared with GAFIX / HOLDG /
-// GAI18 / GAI28. Read-modify-write to preserve the other bits.
-bool set_wpoff(bool on) {
-    State& s = state();
-    std::lock_guard lk(s.mu);
-    s.wpoff = on;
-    if (!ensure())
-        return false;
-    auto h = s.usb.h;
-    const auto addr = saa::kSaaDefaultAddr;
-    std::uint8_t cur = 0;
-    if (saa::saa_read(h, addr, saa::kSaaInputCntl2, cur) < 0)
-        return false;
-    const std::uint8_t nv = on ? static_cast<std::uint8_t>(cur | saa::kSaaWpoff)
-                               : static_cast<std::uint8_t>(cur & ~saa::kSaaWpoff);
-    return saa::saa_write(h, addr, saa::kSaaInputCntl2, nv) >= 0;
-}
-
-bool set_hlnrs(bool on) {
-    State& s = state();
-    std::lock_guard lk(s.mu);
-    s.hlnrs = on;
-    if (!ensure())
-        return false;
-    auto h = s.usb.h;
-    const auto addr = saa::kSaaDefaultAddr;
-    std::uint8_t cur = 0;
-    if (saa::saa_read(h, addr, saa::kSaaInputCntl2, cur) < 0)
-        return false;
-    const std::uint8_t nv = on ? static_cast<std::uint8_t>(cur | saa::kSaaHlnrs)
-                               : static_cast<std::uint8_t>(cur & ~saa::kSaaHlnrs);
-    return saa::saa_write(h, addr, saa::kSaaInputCntl2, nv) >= 0;
-}
-
-bool get_wpoff() {
-    return state().wpoff;
-}
-bool get_hlnrs() {
-    return state().hlnrs;
 }
 
 }  // namespace camchip
