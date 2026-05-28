@@ -47,6 +47,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -650,6 +651,10 @@ class CMVisionGrabberFilter final : public IBaseFilter, public IAMVideoProcAmp {
     // ---- WinUSB capture state (worker thread) ---------------------------
     std::thread m_capThread;
     std::atomic<bool> m_capRun{false};
+    // Number of transfers libusb still owns (submitted, not yet handed back
+    // to us in a non-resubmitting callback). Teardown waits for this to
+    // drain to zero before libusb_free_transfer'ing -- see capture_loop().
+    std::atomic<int> m_xfersLive{0};
     std::mutex m_usbMu;                // guards usb access from
                                         // IAMVideoProcAmp + worker
     saa::UsbCtx m_usb;                 // opened on first Run(), released
@@ -992,9 +997,18 @@ class CMVisionGrabberFilter final : public IBaseFilter, public IAMVideoProcAmp {
     void deliver_frame();
 
     // Capture loop: submits isoc URBs, kicks streaming, pumps events.
+    //
+    // Teardown contract (every transfer must reach a callback-done state
+    // before we libusb_free_transfer it -- otherwise libusb's
+    // flying_transfers list keeps the freed pointer and the next event
+    // pump dereferences it: see usbi_handle_transfer_completion AV at
+    // exit). We track outstanding xfers in m_xfersLive: on_isoc decrements
+    // it whenever the callback won't resubmit; teardown loops on
+    // libusb_handle_events_completed until live == 0, THEN frees.
     void capture_loop() {
         std::vector<libusb_transfer*> xfers(kNumXfers, nullptr);
         std::vector<std::vector<std::uint8_t>> bufs(kNumXfers);
+        m_xfersLive.store(0);
         for (int i = 0; i < kNumXfers; ++i) {
             xfers[i] = libusb_alloc_transfer(kNumPkts);
             bufs[i].assign(std::size_t(kNumPkts * m_isocMaxPkt), 0);
@@ -1003,7 +1017,9 @@ class CMVisionGrabberFilter final : public IBaseFilter, public IAMVideoProcAmp {
                                      kNumPkts, &CMVisionGrabberFilter::on_isoc,
                                      this, 1000);
             libusb_set_iso_packet_lengths(xfers[i], std::uint32_t(m_isocMaxPkt));
-            libusb_submit_transfer(xfers[i]);
+            if (libusb_submit_transfer(xfers[i]) == 0) {
+                m_xfersLive.fetch_add(1);
+            }
         }
         // Kick streaming AFTER URBs are pending.
         saa::stk_write_reg(m_usb.h, 0x100, 0xb3);
@@ -1014,17 +1030,38 @@ class CMVisionGrabberFilter final : public IBaseFilter, public IAMVideoProcAmp {
             libusb_handle_events_timeout_completed(nullptr, &tv, nullptr);
         }
 
-        for (auto* x : xfers) if (x) libusb_cancel_transfer(x);
-        timeval tv{0, 500000};
-        libusb_handle_events_timeout_completed(nullptr, &tv, nullptr);
-        for (auto* x : xfers) if (x) libusb_free_transfer(x);
+        // Cancel everything still in-flight, then DRAIN the cancellation
+        // callbacks before freeing. m_xfersLive is decremented in on_isoc
+        // whenever the callback won't resubmit; we cap the wait at ~3s so
+        // a wedged endpoint can't hang the host.
+        for (auto* x : xfers) {
+            if (x != nullptr) libusb_cancel_transfer(x);
+        }
+        const auto t0 = std::chrono::steady_clock::now();
+        while (m_xfersLive.load() > 0) {
+            timeval tv{0, 100000};  // 100 ms
+            libusb_handle_events_timeout_completed(nullptr, &tv, nullptr);
+            if (std::chrono::steady_clock::now() - t0 > std::chrono::seconds(3)) {
+                OutputDebugStringA("[mvision_grabber] xfer drain timed out; "
+                                   "leaking remaining transfers\n");
+                return;  // intentionally leak rather than free-while-flying
+            }
+        }
+        for (auto* x : xfers) {
+            if (x != nullptr) libusb_free_transfer(x);
+        }
     }
 };
 
 void CMVisionGrabberFilter::on_isoc(libusb_transfer* xfer) {
     auto* self = static_cast<CMVisionGrabberFilter*>(xfer->user_data);
     if (xfer->status == LIBUSB_TRANSFER_CANCELLED ||
-        xfer->status == LIBUSB_TRANSFER_NO_DEVICE) return;
+        xfer->status == LIBUSB_TRANSFER_NO_DEVICE) {
+        // Final state -- libusb is done with this transfer struct. Signal
+        // teardown drain (capture_loop spins on m_xfersLive).
+        self->m_xfersLive.fetch_sub(1);
+        return;
+    }
     for (int i = 0; i < xfer->num_iso_packets; ++i) {
         auto& d = xfer->iso_packet_desc[i];
         if (d.status != LIBUSB_TRANSFER_COMPLETED) continue;
@@ -1032,7 +1069,11 @@ void CMVisionGrabberFilter::on_isoc(libusb_transfer* xfer) {
             libusb_get_iso_packet_buffer_simple(xfer, std::uint32_t(i));
         self->process_packet(p, int(d.actual_length));
     }
-    if (self->m_capRun.load()) libusb_submit_transfer(xfer);
+    if (self->m_capRun.load() && libusb_submit_transfer(xfer) == 0) {
+        return;  // still live
+    }
+    // Not resubmitted -- libusb is done with this transfer struct.
+    self->m_xfersLive.fetch_sub(1);
 }
 
 void CMVisionGrabberFilter::process_packet(const std::uint8_t* p, int len) {
