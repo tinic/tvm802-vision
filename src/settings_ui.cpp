@@ -41,6 +41,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <condition_variable>
 #include <cstring>
 #include <format>
 #include <fstream>
@@ -423,6 +424,65 @@ void refresh_value_labels() {
     }
 }
 
+// Async chip-push: queues the "push these camera settings to chip" task to a
+// dedicated worker thread. Dialog + apply_from_controls stay responsive even
+// if libusb is slow (e.g. first open contends with mvision_grabber.ax's
+// claim_interface; that contention pegged a core for ~20 s when we did this
+// synchronously). One in-flight request; new requests overwrite the pending
+// state -- only the LATEST settings need to land on the chip, intermediate
+// drag positions can be dropped.
+//
+// HEAP-ALLOCATED + NEVER DESTROYED. Static mutex / condition_variable would
+// be destructed on DLL unload (process exit); the worker thread terminated
+// by the OS may still leave the dtor in an inconsistent state (e.g. mutex
+// destroyed while still "owned"), causing an AV at exit. Same fix as the
+// camera_chip State pattern -- new'd once via call_once, pointer captured
+// by the worker, never freed.
+struct ChipPushState {
+    std::mutex mu;
+    std::condition_variable cv;
+    Settings s;
+    bool valid = false;
+};
+ChipPushState* push_state_get() {
+    static ChipPushState* p = nullptr;
+    static std::once_flag once;
+    std::call_once(once, [] {
+        p = new ChipPushState{};
+        ChipPushState* cap = p;
+        std::thread([cap] {
+            while (true) {
+                Settings local;
+                {
+                    std::unique_lock<std::mutex> lk(cap->mu);
+                    cap->cv.wait(lk, [cap] { return cap->valid; });
+                    local = cap->s;
+                    cap->valid = false;
+                }
+                camchip::set_brightness(static_cast<int>(local.camBrightness));
+                camchip::set_contrast(static_cast<int>(local.camContrast));
+                camchip::set_agc(local.camAgc > 0.5);
+                if (local.camAgc <= 0.5) {
+                    camchip::set_gain(static_cast<int>(local.camGain));
+                }
+                camchip::set_sharpness(static_cast<int>(local.camSharpness));
+                camchip::set_prefilter(local.camPrefilter > 0.5);
+            }
+        }).detach();
+    });
+    return p;
+}
+
+void schedule_chip_push(const Settings& s) {
+    ChipPushState* p = push_state_get();
+    {
+        std::lock_guard<std::mutex> lk(p->mu);
+        p->s = s;
+        p->valid = true;
+    }
+    p->cv.notify_one();
+}
+
 // pos>0 (or !=0 for signed) overrides; 0 = Auto/off (detector default).
 double map_to_setting(Idx i, int pos) {
     switch (i) {
@@ -457,26 +517,14 @@ void apply_from_controls() {
     s.meanHi = map_to_setting(S_EXPHI, tb_pos(S_EXPHI));
     s.blur = map_to_setting(S_BLUR, tb_pos(S_BLUR));
     s.medianRings = (SendMessageA(g_chkMedian, BM_GETCHECK, 0, 0) == BST_CHECKED) ? 1.0 : 0.0;
-    // Camera tab: store current slider values + push to chip. The chip writes
-    // are cheap (single I2C round-trip per slider; <1 ms) so doing them on
-    // every WM_HSCROLL is fine. If the chip is unreachable (no Zadig binding
-    // on a dev machine) the setters silently no-op.
     s.camBrightness = static_cast<double>(tb_pos(S_CAM_BRI));
     s.camContrast = static_cast<double>(tb_pos(S_CAM_CON));
     s.camGain = static_cast<double>(tb_pos(S_CAM_GAIN));
     s.camAgc = (SendMessageA(g_chkAgc, BM_GETCHECK, 0, 0) == BST_CHECKED) ? 1.0 : 0.0;
     s.camSharpness = static_cast<double>(tb_pos(S_CAM_SHARP));
     s.camPrefilter = (SendMessageA(g_chkPref, BM_GETCHECK, 0, 0) == BST_CHECKED) ? 1.0 : 0.0;
-    camchip::set_brightness(static_cast<int>(s.camBrightness));
-    camchip::set_contrast(static_cast<int>(s.camContrast));
-    camchip::set_agc(s.camAgc > 0.5);
-    if (s.camAgc <= 0.5) {
-        // Manual gain only meaningful when AGC is off; chip ignores reg 0x04/0x05
-        // otherwise.
-        camchip::set_gain(static_cast<int>(s.camGain));
-    }
-    camchip::set_sharpness(static_cast<int>(s.camSharpness));
-    camchip::set_prefilter(s.camPrefilter > 0.5);
+    // Chip writes are pushed asynchronously -- see schedule_chip_push().
+    schedule_chip_push(s);
     set_settings(g_curMode, s);
     refresh_value_labels();
 }
@@ -557,16 +605,12 @@ void controls_from_settings() {
     SendMessageA(g_chkMedian, BM_SETCHECK, s.medianRings > 0.5 ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageA(g_chkAgc, BM_SETCHECK, s.camAgc > 0.5 ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageA(g_chkPref, BM_SETCHECK, s.camPrefilter > 0.5 ? BST_CHECKED : BST_UNCHECKED, 0);
-    // Push this mode's camera config to the chip so switching modes in the
-    // dropdown immediately reflects in the live image.
-    camchip::set_brightness(static_cast<int>(s.camBrightness));
-    camchip::set_contrast(static_cast<int>(s.camContrast));
-    camchip::set_agc(s.camAgc > 0.5);
-    if (s.camAgc <= 0.5) {
-        camchip::set_gain(static_cast<int>(s.camGain));
-    }
-    camchip::set_sharpness(static_cast<int>(s.camSharpness));
-    camchip::set_prefilter(s.camPrefilter > 0.5);
+    // Push this mode's camera config to the chip asynchronously so switching
+    // modes (or opening the dialog) doesn't block on libusb. Calling
+    // camchip::set_* synchronously here used to wedge the UI for ~20 s when
+    // mvision_grabber.ax already had WinUSB claimed -- the contention
+    // serialised libusb_open and pegged a core in the dialog thread.
+    schedule_chip_push(s);
     // Component has no fiducial ring: relabel the two repurposed sliders to the
     // stray-guard knobs. Down modes keep the diameter-bracket labels.
     SetWindowTextA(g_lblName[S_RMIN], comp ? "Search radius" : "Diameter min");
