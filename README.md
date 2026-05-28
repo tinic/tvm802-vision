@@ -10,7 +10,9 @@ Drop-in `MVision.dll` for the QiHe **TVM802A / TVM802B / TVM802BX** pick-and-pla
 
 1. Download **`tvm802-vision-vX.Y.Z.zip`** from the [latest release](https://github.com/tinic/tvm802-vision/releases/latest).
 2. Unzip it, close `SurfaceMount.exe`, right-click **`install.bat` → Run as administrator**.
-3. (Optional, only for chip-level Camera tab) Run **Zadig** once per machine — `INSTALL.md` in the zip has the per-step walkthrough.
+3. (Optional, only for chip-level Camera tab) Run **Zadig** once per machine — see **[install/INSTALL.md](install/INSTALL.md)** for the per-step walkthrough.
+
+Full installation guide (Zadig, BX rename, troubleshooting, uninstall): **[install/INSTALL.md](install/INSTALL.md)**.
 
 **On the TVM802BX** (built-in Atom): after `install.bat`, rename `MVision-noavx2.dll` → `MVision.dll` in the SurfaceMount folder. (The Atom N2800 has no AVX2; `INSTALL.md` covers this.)
 
