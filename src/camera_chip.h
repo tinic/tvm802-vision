@@ -32,6 +32,8 @@ bool set_agc(bool on);        // true  = GAFIX 0 = AGC drives gain
                               // false = GAFIX 1 = manual gain in reg 0x04/0x05
 bool set_sharpness(int v);    // 0..3 (reg 0x09 APER bits): factor 0 / 0.25 / 0.5 / 1.0
 bool set_prefilter(bool on);  // reg 0x09 PREF bit: true = luma low-pass on, false = off
+bool set_wpoff(bool on);      // reg 0x03 WPOFF bit: true = AGC ignores white peaks (stabler exposure on glossy SMT)
+bool set_hlnrs(bool on);      // reg 0x03 HLNRS bit: true = "reference select" clamping when H-sync briefly unlocks
 
 // Last-set value (or chip default if never set this session). The UI
 // uses these to initialise its sliders without doing a chip read at
@@ -44,5 +46,7 @@ int get_gain();
 bool get_agc();
 int get_sharpness();
 bool get_prefilter();
+bool get_wpoff();
+bool get_hlnrs();
 
 }  // namespace camchip
