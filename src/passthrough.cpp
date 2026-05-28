@@ -25,7 +25,6 @@
 #include <chrono>
 #include <cstdint>
 #include <format>
-#include <functional>
 #include <limits>
 #include <mutex>
 #include <string>
@@ -217,12 +216,7 @@ constexpr double kUpScale = 1.0;      // size + offset are reported in raw pixel
 constexpr double kUpAngleSign = 1.0;  // angle handedness matches ours -- no flip
 
 // OUR component detector drives placement; the original is invoked for its
-// preview/log side effects only. kCompDrive used to be a compile-time
-// shadow/drive switch (false = our detector runs read-only alongside the
-// original, logging both for kUp*-constants calibration) and survives here
-// so the shadow branch stays compiled -- useful if a future detector
-// refactor needs the same calibration loop -- but ships as true.
-constexpr bool kCompDrive = true;
+// preview/log side effects only.
 
 // Compute our result in the native convention from a detection.
 // The original mirrors the frame 180 deg (down-vision camera mirror mode) before
@@ -258,7 +252,7 @@ void set_our_result(const vis::MarkResult& mr) {
 
 // Pack an up-vision component pose into the comp GetOffset fields: x/y = component
 // SIZE, w/h = center OFFSET from the frame center, a = angle (see the kUp*
-// calibration above). Only reached when kCompDrive is true.
+// calibration above).
 void set_our_comp_result(const vis::CompResult& cr) {
     const double cxC = cr.imgW / 2.0;
     const double cyC = cr.imgH / 2.0;
@@ -274,12 +268,9 @@ void set_our_comp_result(const vis::CompResult& cr) {
     g_resultSrc = ResultSrc::Comp;
 }
 
-// Optional capture/logging (opt-in via trigger file). `shadow`, when non-null, is
-// a read-only comparison detector's result (e.g. circular-symmetry run alongside
-// the driving detector) — appended to the line for offline comparison; it never
-// drives placement.
+// Optional capture/logging (opt-in via trigger file).
 void maybe_log(const void* frame, const char* func, int algo, int range,
-               const vis::MarkResult& mr, const vis::MarkResult* shadow = nullptr) {
+               const vis::MarkResult& mr) {
     if (!cap::armed()) {
         return;
     }
@@ -305,10 +296,6 @@ void maybe_log(const void* frame, const char* func, int algo, int range,
             mr.found ? 1 : 0, mr.cx, mr.cy, g_ourW, g_ourH, g_ourMin,
             g_qfMs, g_detMs, g_renderMs,
             mr.headerOk ? 1 : 0, mr.imgW, mr.imgH, mr.imgOrigin, mr.frameHash);
-        if (shadow != nullptr) {
-            line += std::format(",csym,found={},cx={:.2f},cy={:.2f},score={:.3f}",
-                                shadow->found ? 1 : 0, shadow->cx, shadow->cy, shadow->quality);
-        }
         cap::log_line(line);
     } catch (...) {  // NOLINT(bugprone-empty-catch) -- best-effort logging; never fatal
     }
@@ -353,7 +340,7 @@ void maybe_log_comp(const void* frame, const vis::CompResult& cr) {
         if (cap::frames_enabled()) {
             vis::save_frame(frame, std::format("{}\\comp_{:04d}.png", cap::dir(), idx).c_str());
         }
-        // The original's result (it ran in shadow mode, or for its preview side effect).
+        // The original's result (it ran for its preview side effect).
         double ox = 0;
         double oy = 0;
         double ow = 0;
@@ -367,12 +354,12 @@ void maybe_log_comp(const void* frame, const vis::CompResult& cr) {
                              : cr.method == vis::CompResult::Method::MinAreaRect ? "minarearect"
                                                                                  : "none";
         cap::log_line(std::format(
-            "{:04d},CheckComp,drive={},thr={},expW={:.3f},expH={:.3f},expA={:.3f},upo={:.1f}/{:.1f},"
+            "{:04d},CheckComp,thr={},expW={:.3f},expH={:.3f},expA={:.3f},upo={:.1f}/{:.1f},"
             "ours,found={},cx={:.2f},cy={:.2f},w={:.2f},h={:.2f},angle={:.2f},q={:.3f},method={},"
             "orig,x={:.4f},y={:.4f},w={:.4f},h={:.4f},a={:.4f},min={:.3f},"
             "ms,queryFrame={:.1f},detect={:.1f},"
             "ipl,ok={},w={},h={},origin={},fhash={}",
-            idx, kCompDrive ? 1 : 0, g_compThreshold, g_compExpW, g_compExpH, g_compExpA,
+            idx, g_compThreshold, g_compExpW, g_compExpH, g_compExpA,
             g_upoX, g_upoY,
             cr.found ? 1 : 0, cr.cx, cr.cy, cr.w, cr.h, cr.angle, cr.quality, method,
             ox, oy, ow, oh, oa, omin,
@@ -382,18 +369,15 @@ void maybe_log_comp(const void* frame, const vis::CompResult& cr) {
     }
 }
 
-// Shared scaffolding for the down-vision mark checks we own (CheckMark2,
-// CheckTemplate): time the detector, publish OUR result via the GetOffset
-// plumbing, render our own preview (falling back to the original's render only if
-// ours fails), and log. `detect(refX, refY, searchR)` runs the mode-specific
-// detector; `origRender()` calls the original check purely for its preview side
+// Shared scaffolding for the down-vision mark checks we own (CheckMark,
+// CheckMark2, CheckTemplate): time the detector, publish OUR result via the
+// GetOffset plumbing, render our own preview (falling back to the original's
+// render only if ours fails), and log. `detect(refX, refY, searchR)` runs the
+// mode-specific detector; `origRender()` calls the original check purely for its preview side
 // effect. No temporal smoothing — an EMA here lagged the reported center so the
 // host settled on the lagged value and the green cross then drifted off target;
 // the tight radius bracket + both-field detection already give a stable center.
-// `shadow`, when set, is a read-only comparison detector run alongside the driving
-// `detect` (only while capture is armed, to avoid adding latency in production). Its
-// result is logged for offline comparison but NEVER drives placement. Used to vet a
-// candidate detector (circular-symmetry) on live frames before it takes over.
+//
 // AVX2 build guard: the detector code is compiled with AVX2 (-mavx2 / /arch:AVX2),
 // so on a CPU lacking AVX2 the first such instruction faults with a cryptic
 // illegal-instruction crash. On first use, verify the CPU actually has AVX2 and
@@ -431,8 +415,7 @@ std::once_flag g_uiOnce;
 
 template <class Detect, class OrigRender>
 int run_mark_check(const void* f, int hwnd, const char* name, int logAlgo, int logRange,
-                   Detect&& detect, OrigRender&& origRender,
-                   const std::function<vis::MarkResult(double, double, int)>& shadow = {}) {
+                   Detect&& detect, OrigRender&& origRender) {
     double refX = 0.0;
     double refY = 0.0;
     reference_point(f, &refX, &refY);
@@ -441,7 +424,7 @@ int run_mark_check(const void* f, int hwnd, const char* name, int logAlgo, int l
                             : kDefaultSearchPx;
 
     auto t0 = clk::now();
-    const vis::MarkResult mr = detect(refX, refY, searchR);  // read-only
+    const vis::MarkResult mr = detect(refX, refY, searchR);
     g_detMs = ms_since(t0);
 
     set_our_result(mr);  // our offset drives placement
@@ -461,14 +444,6 @@ int run_mark_check(const void* f, int hwnd, const char* name, int logAlgo, int l
         vis::publish_status(st);
     }
 
-    // Read-only shadow comparison (logged only; never drives). Gated on armed so it
-    // costs nothing in production.
-    vis::MarkResult shadowMr;
-    const bool haveShadow = static_cast<bool>(shadow) && cap::armed();
-    if (haveShadow) {
-        shadowMr = shadow(refX, refY, searchR);
-    }
-
     auto t1 = clk::now();
     if (!vis::render_preview(f, reinterpret_cast<void*>(static_cast<intptr_t>(hwnd)),
                              g_mvoX, g_mvoY, searchR, mr)) {
@@ -476,7 +451,7 @@ int run_mark_check(const void* f, int hwnd, const char* name, int logAlgo, int l
     }
     g_renderMs = ms_since(t1);
 
-    maybe_log(f, name, logAlgo, logRange, mr, haveShadow ? &shadowMr : nullptr);
+    maybe_log(f, name, logAlgo, logRange, mr);
     return 0;
 }
 }  // namespace
@@ -548,17 +523,15 @@ void* __stdcall QueryFrame(void* cam, int timeout) {
 // CheckComp (up-vision component pose). Our rectlinear-symmetry detector drives
 // placement by default; the operator's only switch is the "Component" checkbox
 // in Ctrl+Alt+M -> Detectors strip (default ON). With the checkbox off this is
-// a pure passthrough to the original. The compile-time `kCompDrive=true` flag
-// keeps the shadow-mode path compiled (for future calibration runs) but never
-// triggers in shipped builds.
+// a pure passthrough to the original.
 int __stdcall CheckComp(void* f, int hwnd, int w, int h) {
     // Unconditional entry trace + frame snapshot, BEFORE any gate. Even when our
     // detector bypasses (the "Component" checkbox off), we still get a log line
     // and PNG, so an offline scan can prove the host DID call us. Pair with the
     // detailed log line in maybe_log_comp() below.
     trace_call("CheckComp",
-               std::format("w={},h={},methodOn={},drive={},thr={},expW={:.3f},expH={:.3f},expA={:.3f}",
-                           w, h, vis::method_enabled(vis::METHOD_COMP) ? 1 : 0, kCompDrive ? 1 : 0,
+               std::format("w={},h={},methodOn={},thr={},expW={:.3f},expH={:.3f},expA={:.3f}",
+                           w, h, vis::method_enabled(vis::METHOD_COMP) ? 1 : 0,
                            g_compThreshold, g_compExpW, g_compExpH, g_compExpA));
     trace_save_frame(f, "CheckCompEntry");
     // Ctrl+Alt+U one-shot snapshot. Fires BEFORE the method-enabled gate so a
@@ -612,41 +585,31 @@ int __stdcall CheckComp(void* f, int hwnd, int w, int h) {
         g_compWH.median(&cr.w, &cr.h);
     }
 
-    // `if constexpr` so the shadow-default build (kCompDrive=false) doesn't trip MSVC
-    // C4127 (constant condition) under /WX; the drive branch is discarded but still
-    // compiled, so set_our_comp_result stays referenced.
     int rc = 0;
-    if constexpr (kCompDrive) {
-        if (cr.found) {
-            set_our_comp_result(cr);             // our pose drives via comp-mode GetOffset
-            mv::orig::CheckComp(f, hwnd, w, h);  // original: result for the log + render fallback
-            rc = 0;
-        } else {
-            // Signal NOT-FOUND to the host by reporting a zero-size GetOffset
-            // packing. In our comp packing (see set_our_comp_result above)
-            // GetOffset.x carries the detected component size W; a real part
-            // always has W > 0, so W = 0 is the host-visible "no part" signal.
-            // The host then handles the missing-part case via its own retry
-            // path -- a controlled stop after a few retries if the part is
-            // genuinely absent -- instead of the OLD behavior of forwarding
-            // to the original DLL, which locks onto a stray blob and places a
-            // phantom part there. This closes the missing-part-reject gap
-            // called out in README ("Status -> Known gap").
-            g_compX = 0.0;                  // GetOffset x = size W -> 0 = NOT-FOUND sentinel
-            g_compY = 0.0;                  // GetOffset y = size H
-            g_compW = 0.0;                  // GetOffset w = offset X
-            g_compH = 0.0;                  // GetOffset h = offset Y
-            g_compA = 0.0;                  // GetOffset a = angle
-            g_compMin = 1.0;                // worst quality
-            g_resultSrc = ResultSrc::Comp;  // OUR not-found governs GetOffset/GetMin_val
-            // Still invoke the original so its preview/log side effects run; we
-            // discard its result -- g_resultSrc=Comp owns the GetOffset table.
-            mv::orig::CheckComp(f, hwnd, w, h);
-            rc = 0;
-        }
+    if (cr.found) {
+        set_our_comp_result(cr);             // our pose drives via comp-mode GetOffset
+        mv::orig::CheckComp(f, hwnd, w, h);  // original: result for the log + render fallback
     } else {
-        g_resultSrc = ResultSrc::Original;  // shadow mode: original drives
-        rc = mv::orig::CheckComp(f, hwnd, w, h);
+        // Signal NOT-FOUND to the host by reporting a zero-size GetOffset
+        // packing. In our comp packing (see set_our_comp_result above)
+        // GetOffset.x carries the detected component size W; a real part
+        // always has W > 0, so W = 0 is the host-visible "no part" signal.
+        // The host then handles the missing-part case via its own retry
+        // path -- a controlled stop after a few retries if the part is
+        // genuinely absent -- instead of the OLD behavior of forwarding
+        // to the original DLL, which locks onto a stray blob and places a
+        // phantom part there. This closes the missing-part-reject gap
+        // called out in README ("Status -> Known gap").
+        g_compX = 0.0;                  // GetOffset x = size W -> 0 = NOT-FOUND sentinel
+        g_compY = 0.0;                  // GetOffset y = size H
+        g_compW = 0.0;                  // GetOffset w = offset X
+        g_compH = 0.0;                  // GetOffset h = offset Y
+        g_compA = 0.0;                  // GetOffset a = angle
+        g_compMin = 1.0;                // worst quality
+        g_resultSrc = ResultSrc::Comp;  // OUR not-found governs GetOffset/GetMin_val
+        // Still invoke the original so its preview/log side effects run; we
+        // discard its result -- g_resultSrc=Comp owns the GetOffset table.
+        mv::orig::CheckComp(f, hwnd, w, h);
     }
     // Render OUR component overlay (oriented box + direction arrow, green on lock),
     // drawn in OpenCV and blitted over whatever the original rendered above. If ours
@@ -689,11 +652,11 @@ int __stdcall CheckMark(void* f, int hwnd, int w, int h, int algo, int r) {
         g_resultSrc = ResultSrc::Original;  // not Round, or operator disabled our Round detector
         return mv::orig::CheckMark(f, hwnd, w, h, algo, r);
     }
-    // Circular-symmetry DRIVES placement (shadow-validated on hardware: matched/
-    // exceeded the contour detector, sub-pixel agreement, Hough-class settled
-    // stability). On a miss it writes a zero offset ("stay put") -- same fail-safe
-    // as the contour path. (r = strength; the symmetry detector ignores it but it
-    // still tags the log line and feeds the original's preview fallback.)
+    // Circular-symmetry drives placement: matches or beats the original contour
+    // detector and is stable to sub-pixel precision once the head settles. On a
+    // miss it writes a zero offset ("stay put"), so a brief dropout holds rather
+    // than nudging the head. (r = strength; the symmetry detector ignores it,
+    // but it still tags the log line and feeds the original's preview fallback.)
     return run_mark_check(
         f, hwnd, "CheckMark", algo, r,
         [&](double refX, double refY, int searchR) { return vis::detect_circular_symmetry(f, refX, refY, searchR); },

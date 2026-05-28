@@ -460,7 +460,8 @@ ChipPushState* push_state_get() {
     static ChipPushState* p = nullptr;
     static std::once_flag once;
     std::call_once(once, [] {
-        p = new ChipPushState{};
+        p = new ChipPushState{};  // NOLINT(cppcoreguidelines-owning-memory) -- intentional leak; see comment above
+
         ChipPushState* cap = p;
         std::thread([cap] {
             while (true) {
@@ -490,7 +491,7 @@ ChipPushState* push_state_get() {
 void schedule_chip_push(const Settings& s) {
     ChipPushState* p = push_state_get();
     {
-        std::lock_guard<std::mutex> lk(p->mu);
+        const std::lock_guard<std::mutex> lk(p->mu);
         p->s = s;
         p->valid = true;
     }
@@ -916,17 +917,13 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     controls_from_settings();
                 } else if (id == ID_BTN_CLOSE) {
                     ShowWindow(hwnd, SW_HIDE);
-                } else if (id == ID_CHK_MEDIAN) {
-                    apply_from_controls();  // checkbox toggled
                 } else if (id == ID_CHK_AGC) {
                     apply_from_controls();      // camera AGC checkbox -> chip + settings
                     update_enabled(g_curMode);  // grey/ungrey the Cam gain slider
-                } else if (id == ID_CHK_PREF) {
-                    apply_from_controls();  // prefilter checkbox -> chip
-                } else if (id == ID_CHK_WPOFF) {
-                    apply_from_controls();  // WPOFF checkbox -> chip
-                } else if (id == ID_CHK_HLNRS) {
-                    apply_from_controls();  // HLNRS checkbox -> chip
+                } else if (id == ID_CHK_MEDIAN || id == ID_CHK_PREF ||
+                           id == ID_CHK_WPOFF || id == ID_CHK_HLNRS) {
+                    // Any plain checkbox toggle re-applies the live state to the chip + settings.
+                    apply_from_controls();
                 } else if (id >= ID_CHK_ROUND && id <= ID_CHK_COMP) {
                     const int method = id - ID_CHK_ROUND;  // METHOD_* order matches the ID order
                     const bool on = SendMessageA(g_chkMethod[static_cast<std::size_t>(method)],
