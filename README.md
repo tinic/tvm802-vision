@@ -2,6 +2,8 @@
 
 Drop-in `MVision.dll` for the QiHe **TVM802A / TVM802B / TVM802BX** pick-and-place — replaces the stock vision (jittery, drops lock, slow) with a sub-pixel-stable, motion-robust OpenCV pipeline. Plus a chip-level **DirectShow source filter** and a **Ctrl+Alt+M settings dialog** that drive the analog capture board's brightness / contrast / gain directly in hardware.
 
+![Settings dialog beside the SurfaceMount preview](docs/images/capture.png)
+
 > Not affiliated with QiHe. You supply your own original `MVision.dll` (renamed to `MVision-orig.dll`) — no vendor binaries are bundled.
 
 ## Install (5 minutes)
