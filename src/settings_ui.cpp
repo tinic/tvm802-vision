@@ -75,10 +75,12 @@ enum : int { ID_TIMER = 1,
              ID_CHK_CIRCULAR = 1105,
              ID_CHK_TEMPLATE = 1106,
              ID_CHK_COMP = 1107,
-             ID_CBO_MODE = 1108,    // "Edit:" detector dropdown
-             ID_TAB = 1109,         // SysTabControl32
-             ID_CHK_AGC = 1110,     // Camera-tab AGC on/off
-             ID_CHK_PREF = 1111 };  // Camera-tab luma prefilter on/off
+             ID_CBO_MODE = 1108,     // "Edit:" detector dropdown
+             ID_TAB = 1109,          // SysTabControl32
+             ID_CHK_AGC = 1110,      // Camera-tab AGC on/off
+             ID_CHK_PREF = 1111,     // Camera-tab luma prefilter on/off
+             ID_CHK_WPOFF = 1112,    // Camera-tab WPOFF (reg 0x03 D4)
+             ID_CHK_HLNRS = 1113 };  // Camera-tab HLNRS (reg 0x03 D6)
 
 // Tab pages. Each existing control (slider, checkbox, header static, info
 // label) is assigned a Tab via kSliderTab[] / kHeaderTab below. On
@@ -167,6 +169,8 @@ std::array<HWND, S_COUNT> g_lblVal{};
 HWND g_chkMedian = nullptr;
 HWND g_chkAgc = nullptr;                       // Camera-tab AGC on/off
 HWND g_chkPref = nullptr;                      // Camera-tab luma prefilter on/off
+HWND g_chkWpoff = nullptr;                     // Camera-tab WPOFF (AGC ignores white peaks)
+HWND g_chkHlnrs = nullptr;                     // Camera-tab HLNRS (ref-select clamp on H unlock)
 std::array<HWND, METHOD_COUNT> g_chkMethod{};  // Detector on/off boxes, METHOD_* order
 HBRUSH g_brGreen = nullptr, g_brRed = nullptr;
 HBRUSH g_brPanel = nullptr;  // explicit medium-light grey for the dialog surface --
@@ -274,7 +278,9 @@ HWND make_static(HWND parent, const char* text, int x, int y, int w, int h) {
 // We KNOW which HWNDs live inside the tab at WM_CREATE time -- check the HWND
 // directly against that set and there's no ambiguity.
 bool inside_tab(HWND ctl) {
-    if (ctl == g_chkMedian || ctl == g_lblHelpComp || ctl == g_chkAgc || ctl == g_chkPref) {
+    if (ctl == g_chkMedian || ctl == g_lblHelpComp ||
+        ctl == g_chkAgc || ctl == g_chkPref ||
+        ctl == g_chkWpoff || ctl == g_chkHlnrs) {
         return true;
     }
     auto eq = [ctl](HWND h) { return h == ctl; };
@@ -306,6 +312,12 @@ void show_tab(int tab) {
     }
     if (g_chkPref != nullptr) {
         ShowWindow(g_chkPref, (tab == TAB_CAMERA) ? SW_SHOWNA : SW_HIDE);
+    }
+    if (g_chkWpoff != nullptr) {
+        ShowWindow(g_chkWpoff, (tab == TAB_CAMERA) ? SW_SHOWNA : SW_HIDE);
+    }
+    if (g_chkHlnrs != nullptr) {
+        ShowWindow(g_chkHlnrs, (tab == TAB_CAMERA) ? SW_SHOWNA : SW_HIDE);
     }
     if (g_lblHelpComp != nullptr) {
         ShowWindow(g_lblHelpComp,
@@ -467,6 +479,8 @@ void apply_from_controls() {
     s.camAgc = (SendMessageA(g_chkAgc, BM_GETCHECK, 0, 0) == BST_CHECKED) ? 1.0 : 0.0;
     s.camSharpness = static_cast<double>(tb_pos(S_CAM_SHARP));
     s.camPrefilter = (SendMessageA(g_chkPref, BM_GETCHECK, 0, 0) == BST_CHECKED) ? 1.0 : 0.0;
+    s.camWpoff = (SendMessageA(g_chkWpoff, BM_GETCHECK, 0, 0) == BST_CHECKED) ? 1.0 : 0.0;
+    s.camHlnrs = (SendMessageA(g_chkHlnrs, BM_GETCHECK, 0, 0) == BST_CHECKED) ? 1.0 : 0.0;
     camchip::set_brightness(static_cast<int>(s.camBrightness));
     camchip::set_contrast(static_cast<int>(s.camContrast));
     camchip::set_agc(s.camAgc > 0.5);
@@ -477,6 +491,8 @@ void apply_from_controls() {
     }
     camchip::set_sharpness(static_cast<int>(s.camSharpness));
     camchip::set_prefilter(s.camPrefilter > 0.5);
+    camchip::set_wpoff(s.camWpoff > 0.5);
+    camchip::set_hlnrs(s.camHlnrs > 0.5);
     set_settings(g_curMode, s);
     refresh_value_labels();
 }
@@ -557,6 +573,8 @@ void controls_from_settings() {
     SendMessageA(g_chkMedian, BM_SETCHECK, s.medianRings > 0.5 ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageA(g_chkAgc, BM_SETCHECK, s.camAgc > 0.5 ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageA(g_chkPref, BM_SETCHECK, s.camPrefilter > 0.5 ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageA(g_chkWpoff, BM_SETCHECK, s.camWpoff > 0.5 ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageA(g_chkHlnrs, BM_SETCHECK, s.camHlnrs > 0.5 ? BST_CHECKED : BST_UNCHECKED, 0);
     // Push this mode's camera config to the chip so switching modes in the
     // dropdown immediately reflects in the live image.
     camchip::set_brightness(static_cast<int>(s.camBrightness));
@@ -567,6 +585,8 @@ void controls_from_settings() {
     }
     camchip::set_sharpness(static_cast<int>(s.camSharpness));
     camchip::set_prefilter(s.camPrefilter > 0.5);
+    camchip::set_wpoff(s.camWpoff > 0.5);
+    camchip::set_hlnrs(s.camHlnrs > 0.5);
     // Component has no fiducial ring: relabel the two repurposed sliders to the
     // stray-guard knobs. Down modes keep the diameter-bracket labels.
     SetWindowTextA(g_lblName[S_RMIN], comp ? "Search radius" : "Diameter min");
@@ -717,6 +737,21 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                             24, 273, 240, 22, hwnd,
                                             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_CHK_PREF)),
                                             g_inst, nullptr);
+                // WPOFF: AGC ignores white peaks -- stabler exposure when the
+                // ROI has small specular highlights (glossy SMT bodies, solder).
+                g_chkWpoff = CreateWindowExA(0, "BUTTON", "Cam AGC ignores white peaks",
+                                             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                                             24, 301, 240, 22, hwnd,
+                                             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_CHK_WPOFF)),
+                                             g_inst, nullptr);
+                // HLNRS: "reference select" clamping when H-sync briefly unlocks
+                // (e.g. across a CD4052 cam-mux flip). Cleaner blacks in that
+                // window vs the "normal clamping" default.
+                g_chkHlnrs = CreateWindowExA(0, "BUTTON", "Cam ref-select clamp on H unlock",
+                                             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                                             24, 329, 260, 22, hwnd,
+                                             reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_CHK_HLNRS)),
+                                             g_inst, nullptr);
 
                 // ---- Detector master switches: persistent strip below the tabs.
                 // Global setting (uncheck = fall back to stock vision for that
@@ -846,6 +881,10 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     update_enabled(g_curMode);  // grey/ungrey the Cam gain slider
                 } else if (id == ID_CHK_PREF) {
                     apply_from_controls();  // prefilter checkbox -> chip
+                } else if (id == ID_CHK_WPOFF) {
+                    apply_from_controls();  // WPOFF checkbox -> chip
+                } else if (id == ID_CHK_HLNRS) {
+                    apply_from_controls();  // HLNRS checkbox -> chip
                 } else if (id >= ID_CHK_ROUND && id <= ID_CHK_COMP) {
                     const int method = id - ID_CHK_ROUND;  // METHOD_* order matches the ID order
                     const bool on = SendMessageA(g_chkMethod[static_cast<std::size_t>(method)],
